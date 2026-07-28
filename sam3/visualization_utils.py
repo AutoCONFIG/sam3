@@ -636,6 +636,7 @@ def draw_masks_to_frame(
                 cv2.CHAIN_APPROX_NONE,
             )
         else:
+            # pyre-fixme[23]: Unable to unpack 2 values, 3 were expected.
             _, contours, _ = cv2.findContours(
                 np.array(mask, dtype=np.uint8).copy(),
                 cv2.RETR_TREE,

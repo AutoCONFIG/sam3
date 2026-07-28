@@ -6,6 +6,7 @@ import logging
 import torch
 
 try:
+    # pyre-fixme[21]: Could not find module `cc_torch`.
     from cc_torch import get_connected_components
 
     HAS_CC_TORCH = True
