@@ -911,9 +911,9 @@ class Sam3VideoInference(Sam3VideoBase):
         # set the model to single GPU for benchmark evaluation (to be compatible with trainer)
         orig_rank = self.rank
         orig_world_size = self.world_size
-        # pyre-fixme[16]: `Module` has no attribute `rank`.
+        # pyrefly: ignore [bad-argument-type]
         self.rank = self.detector.rank = 0
-        # pyre-fixme[16]: `Module` has no attribute `world_size`.
+        # pyrefly: ignore [bad-argument-type]
         self.world_size = self.detector.world_size = 1
 
         # get data
@@ -954,7 +954,9 @@ class Sam3VideoInference(Sam3VideoBase):
         preds = self.prep_for_evaluator(input.raw_images, tracking_res, scores_labels)
 
         # revert the model to the original GPU and rank
+        # pyrefly: ignore [bad-argument-type]
         self.rank = self.detector.rank = orig_rank
+        # pyrefly: ignore [bad-argument-type]
         self.world_size = self.detector.world_size = orig_world_size
         return {video_id: preds}
 

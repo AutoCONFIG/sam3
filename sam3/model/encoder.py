@@ -112,8 +112,7 @@ class TransformerEncoderLayer(nn.Module):
         Returns:
             Processed tensor
         """
-        # pyre-fixme[58]: `+` is not supported for operand types `Tensor` and
-        #  `Optional[Tensor]`.
+        # pyrefly: ignore [unsupported-operation]
         q = k = tgt + query_pos if self.pos_enc_at_attn else tgt
 
         # Self attention
@@ -126,8 +125,6 @@ class TransformerEncoderLayer(nn.Module):
         # Cross attention to image
         tgt2 = self.cross_attn_image(
             query=tgt + query_pos if self.pos_enc_at_cross_attn_queries else tgt,
-            # pyre-fixme[58]: `+` is not supported for operand types `Tensor` and
-            #  `Optional[Tensor]`.
             key=memory + pos if self.pos_enc_at_cross_attn_keys else memory,
             value=memory,
             attn_mask=memory_mask,
@@ -190,13 +187,11 @@ class TransformerEncoderLayer(nn.Module):
         tgt = tgt + self.dropout1(tgt2)
         if dac:
             # Recombine
-            # pyre-fixme[61]: `other_tgt` is undefined, or not always defined.
+            # pyrefly: ignore [unbound-name]
             tgt = torch.cat((tgt, other_tgt), dim=0)
         tgt2 = self.norm2(tgt)
         tgt2 = self.cross_attn_image(
             query=tgt2 + query_pos if self.pos_enc_at_cross_attn_queries else tgt2,
-            # pyre-fixme[58]: `+` is not supported for operand types `Tensor` and
-            #  `Optional[Tensor]`.
             key=memory + pos if self.pos_enc_at_cross_attn_keys else memory,
             value=memory,
             attn_mask=memory_mask,
@@ -510,7 +505,6 @@ class TransformerEncoderFusion(TransformerEncoder):
             self.text_pooling_proj = nn.Linear(d_model, d_model)
         self.pool_text_with_mask = pool_text_with_mask
         if compile_mode is not None:
-            # pyre-fixme[8]: Attribute has type `(self: TransformerEncoderFusion, src...
             self.forward = torch.compile(
                 self.forward, mode=compile_mode, fullgraph=True
             )
@@ -520,8 +514,7 @@ class TransformerEncoderFusion(TransformerEncoder):
         # Not needed here
         return None
 
-    # pyre-fixme[14]: `forward` overrides method defined in `TransformerEncoder`
-    #  inconsistently.
+    # pyrefly: ignore [bad-override]
     def forward(
         self,
         src: List[Tensor],
@@ -538,17 +531,21 @@ class TransformerEncoderFusion(TransformerEncoder):
         if feat_sizes is not None:
             assert len(feat_sizes) == len(src)
             if src_key_padding_mask is None:
+                # pyrefly: ignore [bad-assignment]
                 src_key_padding_mask = [None] * len(src)
-            # pyre-fixme[23]: Unable to unpack `int` into 2 values.
+            # pyrefly: ignore [not-iterable]
             for i, (h, w) in enumerate(feat_sizes):
                 src[i] = src[i].reshape(h, w, bs, -1).permute(2, 3, 0, 1)
-                # pyre-fixme[16]: `Optional` has no attribute `__setitem__`.
-                # pyre-fixme[16]: `Optional` has no attribute `__getitem__`.
+                # pyrefly: ignore [unsupported-operation]
                 src_pos[i] = src_pos[i].reshape(h, w, bs, -1).permute(2, 3, 0, 1)
+                # pyrefly: ignore [unsupported-operation]
                 src_key_padding_mask[i] = (
-                    # pyre-fixme[16]: `Optional` has no attribute `reshape`.
+                    # pyrefly: ignore [unsupported-operation]
                     src_key_padding_mask[i].reshape(h, w, bs).permute(2, 0, 1)
-                    if src_key_padding_mask[i] is not None
+                    if src_key_padding_mask[  # pyrefly: ignore [unsupported-operation]
+                        i
+                    ]  # pyrefly: ignore [unsupported-operation]
+                    is not None  # pyrefly: ignore [unsupported-operation]
                     else None
                 )
         else:
@@ -575,8 +572,6 @@ class TransformerEncoderFusion(TransformerEncoder):
             valid_ratios,
         ) = super().forward(
             src,
-            # pyre-fixme[6]: For 2nd argument expected `Optional[List[Tensor]]` but
-            #  got `Union[None, List[None], List[Tensor]]`.
             src_key_padding_masks=src_key_padding_mask,
             pos=src_pos,
             prompt=prompt.transpose(0, 1),

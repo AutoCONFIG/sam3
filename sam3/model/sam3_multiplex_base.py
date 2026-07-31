@@ -277,6 +277,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
         self.new_det_thresh = new_det_thresh
         self.is_multiplex = is_multiplex
         self.running_in_prod = running_in_prod
+        # pyrefly: ignore [bad-argument-type]
         self.detector.running_in_prod = running_in_prod
 
         assert (
@@ -587,6 +588,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
                 reverse=reverse,
                 det_out=det_out,
                 tracker_states_local=tracker_states_local,
+                # pyrefly: ignore [bad-argument-type]
                 tracker_update_plan=sam2_update_plan,
                 tracker_metadata_new=tracker_metadata_new,
                 orig_vid_height=orig_vid_height,
@@ -606,10 +608,12 @@ class Sam3MultiplexBase(Sam3VideoBase):
                     tracker_low_res_masks_global=tracker_low_res_masks_global,
                     tracker_obj_scores_global=tracker_obj_scores_global,
                     tracker_metadata_prev=tracker_metadata_prev,
+                    # pyrefly: ignore [bad-argument-type]
                     sam2_update_plan=sam2_update_plan,
                     orig_vid_height=orig_vid_height,
                     orig_vid_width=orig_vid_width,
                     reconditioned_obj_ids=reconditioned_obj_ids,
+                    # pyrefly: ignore [bad-argument-type]
                     det_to_matched_trk_obj_ids=det_to_matched_trk_obj_ids,
                 )
                 obj_id_to_score = tracker_metadata_new["obj_id_to_score"]
@@ -654,6 +658,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
         # Step 1: if text feature is not cached in `feature_cache`, compute and cache it
         text_batch_key = tuple(input_batch.find_text_batch)
         if "text" not in feature_cache or text_batch_key not in feature_cache["text"]:
+            # pyrefly: ignore [missing-attribute]
             text_outputs = self.detector.backbone.forward_text(
                 input_batch.find_text_batch, device=self.device
             )
@@ -681,6 +686,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
                 "forward_video_grounding_batched_multigpu"
             ):
                 sam3_image_out, _ = (
+                    # pyrefly: ignore [not-callable]
                     self.detector.forward_video_grounding_batched_multigpu(
                         backbone_out=backbone_out,
                         find_inputs=input_batch.find_inputs,
@@ -708,6 +714,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
                 feature_cache["multigpu_buffer"] = {}
 
             with torch.profiler.record_function("forward_video_grounding_multigpu"):
+                # pyrefly: ignore [not-callable]
                 sam3_image_out, _ = self.detector.forward_video_grounding_multigpu(
                     backbone_out=backbone_out,
                     find_inputs=input_batch.find_inputs,
@@ -755,9 +762,11 @@ class Sam3MultiplexBase(Sam3VideoBase):
             # TODO: We do not need the interaction features every frame so there are rooms for optimization
             interaction_sam_mask_decoder = self.tracker.interactive_sam_mask_decoder
             interaction_backbone_fpn = [
+                # pyrefly: ignore [missing-attribute]
                 interaction_sam_mask_decoder.conv_s0(
                     sam3_image_out["interactive_backbone_fpn_0"]
                 ),
+                # pyrefly: ignore [missing-attribute]
                 interaction_sam_mask_decoder.conv_s1(
                     sam3_image_out["interactive_backbone_fpn_1"]
                 ),
@@ -776,7 +785,9 @@ class Sam3MultiplexBase(Sam3VideoBase):
             backbone_cache["interactive"] = interaction_backbone_out
         sam_mask_decoder = self.tracker.sam_mask_decoder
         sam2_backbone_fpn = [
+            # pyrefly: ignore [missing-attribute]
             sam_mask_decoder.conv_s0(sam3_image_out["sam2_backbone_fpn_0"]),
+            # pyrefly: ignore [missing-attribute]
             sam_mask_decoder.conv_s1(sam3_image_out["sam2_backbone_fpn_1"]),
             sam3_image_out["sam2_backbone_fpn_2"],  # fpn_2 doesn't need additional conv
         ]
@@ -920,7 +931,10 @@ class Sam3MultiplexBase(Sam3VideoBase):
         new_masks_binary = (
             F.interpolate(
                 new_masks.unsqueeze(1),
-                size=(input_mask_res, input_mask_res),
+                size=(  # pyrefly: ignore [bad-argument-type]
+                    input_mask_res,
+                    input_mask_res,
+                ),  # pyrefly: ignore [bad-argument-type]
                 mode="bilinear",
                 align_corners=False,
             ).squeeze(1)
@@ -966,6 +980,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
                 with torch.profiler.record_function(
                     "_recodition_masklets.add_new_masks"
                 ):
+                    # pyrefly: ignore [not-callable]
                     self.tracker.add_new_masks(
                         inference_state=inference_state,
                         frame_idx=frame_idx,
@@ -979,6 +994,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
             for i, trk_obj_id in enumerate(valid_trk_obj_ids):
                 for inference_state in tracker_states_local:
                     if trk_obj_id in inference_state["obj_ids"]:
+                        # pyrefly: ignore [not-callable]
                         self.tracker.add_new_mask(
                             inference_state=inference_state,
                             frame_idx=frame_idx,
@@ -1079,11 +1095,15 @@ class Sam3MultiplexBase(Sam3VideoBase):
             )
         if (
             self.reconstruction_bbox_iou_thresh > 0
-            and len(adt_result.trk_id_to_max_iou_high_conf_det) > 0
+            and len(
+                adt_result.trk_id_to_max_iou_high_conf_det  # pyrefly: ignore [missing-attribute]
+            )  # pyrefly: ignore [missing-attribute]
+            > 0  # pyrefly: ignore [missing-attribute]
         ):
             with torch.profiler.record_function(
                 "evaluate_reconstruction_bbox_iou_thresh"
             ):
+                # pyrefly: ignore [missing-attribute]
                 trk_obj_ids = adt_result.trk_id_to_max_iou_high_conf_det.keys()
                 sam2_obj_ids_all_gpu = list(tracker_metadata_prev["obj_ids_all_gpu"])
                 trk_ids = [
@@ -1091,6 +1111,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
                     for trk_obj_id in trk_obj_ids
                     if trk_obj_id in sam2_obj_ids_all_gpu
                 ]
+                # pyrefly: ignore [missing-attribute]
                 det_ids = list(adt_result.trk_id_to_max_iou_high_conf_det.values())
 
                 det_boxes_bbox_iou = det_out["bbox"][det_ids]
@@ -1120,7 +1141,10 @@ class Sam3MultiplexBase(Sam3VideoBase):
         should_recondition_periodic = (
             self.recondition_every_nth_frame > 0
             and frame_idx % self.recondition_every_nth_frame == 0
-            and len(adt_result.trk_id_to_max_iou_high_conf_det) > 0
+            and len(
+                adt_result.trk_id_to_max_iou_high_conf_det  # pyrefly: ignore [missing-attribute]
+            )  # pyrefly: ignore [missing-attribute]
+            > 0  # pyrefly: ignore [missing-attribute]
         )
 
         # Recondition if periodic or IoU condition met
@@ -1147,6 +1171,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
                     obj_id in reconditioned_obj_ids
                     for obj_id in state.get("obj_ids", [])
                 ):
+                    # pyrefly: ignore [not-callable]
                     self.tracker.propagate_in_video_preflight(
                         state, run_mem_encoder=True
                     )
@@ -1727,6 +1752,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
             # propagate one frame
             num_frames_propagated = 0
             with torch.profiler.record_function("sam2_predictor.propagate_in_video"):
+                # pyrefly: ignore [not-callable]
                 for out in self.tracker.propagate_in_video(
                     inference_state,
                     start_frame_idx=frame_idx,
@@ -1757,7 +1783,9 @@ class Sam3MultiplexBase(Sam3VideoBase):
             if filter_obj_ids is not None:
                 # pyre-fixme[61]: `out_obj_ids` is undefined, or not always defined.
                 if len(out_obj_ids) > 0:
+                    # pyrefly: ignore [unbound-name]
                     max_mask_rows = out_low_res_masks.shape[0]
+                    # pyrefly: ignore [unbound-name]
                     max_score_rows = out_obj_scores.shape[0]
                     # Special case: common single-object refinement path where SAM2 returns a single mask row
                     # but a longer out_obj_ids list for the state. Treat the lone row as the requested object.
@@ -1799,7 +1827,9 @@ class Sam3MultiplexBase(Sam3VideoBase):
             if len(out_obj_ids) > 0:
                 # pyre-fixme[61]: `out_obj_ids` is undefined, or not always defined.
                 obj_ids_local.extend(out_obj_ids)
+                # pyrefly: ignore [unbound-name]
                 low_res_masks_list.append(out_low_res_masks.squeeze(1))
+                # pyrefly: ignore [unbound-name]
                 obj_scores_list.append(out_obj_scores.squeeze(1))
 
         # concatenate the output masklets from all local inference states
@@ -1823,6 +1853,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
                 )
                 low_res_masks_local = low_res_masks_local.squeeze(1)
             else:
+                # pyrefly: ignore [bad-argument-type]
                 low_res_masks_local = torch.zeros(0, H_mask, W_mask, device=self.device)
                 obj_scores_local = torch.zeros(0, device=self.device)
 
@@ -2483,6 +2514,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
             return
         # Avoid an extra interpolation step by directly interpolating to `interpol_size`
         high_res_H, high_res_W = (
+            # pyrefly: ignore [missing-attribute]
             self.tracker.maskmem_backbone.mask_downsampler.interpol_size
         )
         # NOTE: inspect this part if we observe OOMs in the demo
@@ -2497,6 +2529,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
             "sam2_predictor.propagate_in_video.apply_non_overlapping_constraints"
         ):
             # TODO: try _apply_object_wise_non_overlapping_constraints instead
+            # pyrefly: ignore [not-callable]
             high_res_masks = self.tracker._suppress_object_pw_area_shrinkage(
                 high_res_masks
             )
@@ -2554,6 +2587,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
             local_batch_size = local_high_res_masks.size(0)
             # Run Sam2 memory encoder. Note that we do not re-enforce the non-overlapping constraint as it is turned off by default
 
+            # pyrefly: ignore [not-callable]
             encoded_mem = self.tracker._run_memory_encoder(
                 sam2_state,
                 frame_idx,
@@ -2612,7 +2646,9 @@ class Sam3MultiplexBase(Sam3VideoBase):
                             newly_suppressed_objects = newly_suppressed_objects.float()
                             new_pointers = (
                                 newly_suppressed_objects
-                                * self.tracker.no_obj_ptr_linear(existing_pointers)
+                                * self.tracker.no_obj_ptr_linear(  # pyrefly: ignore [not-callable]
+                                    existing_pointers
+                                )  # pyrefly: ignore [not-callable]
                                 + (1 - newly_suppressed_objects) * existing_pointers
                             )
 
@@ -2626,6 +2662,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
 
                 # for batched inference state, we also need to add per-object
                 # memory slides to support instance interactivity
+                # pyrefly: ignore [not-callable]
                 self.tracker.add_output_per_object(
                     inference_state=sam2_state,
                     frame_idx=frame_idx,
@@ -2676,6 +2713,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
                 new_sam2_state = best_state
             else:
                 # Need to create a new state
+                # pyrefly: ignore [not-callable]
                 new_sam2_state = self.tracker.init_state(
                     cached_features=feature_cache,
                     video_height=orig_vid_height,
@@ -2696,6 +2734,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
                 if prev_sam2_state is not None:
                     new_sam2_state = prev_sam2_state
                 else:
+                    # pyrefly: ignore [not-callable]
                     new_sam2_state = self.tracker.init_state(
                         cached_features=feature_cache,
                         video_height=orig_vid_height,
@@ -2707,6 +2746,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
             else:
                 # batch objects that first appear on the same frame together
                 # Clear inference state. Keep the cached image features if available.
+                # pyrefly: ignore [not-callable]
                 new_sam2_state = self.tracker.init_state(
                     cached_features=feature_cache,
                     video_height=orig_vid_height,
@@ -2727,6 +2767,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
         input_mask_res = self.tracker.input_mask_size
         new_obj_masks = F.interpolate(
             new_obj_masks.unsqueeze(1),
+            # pyrefly: ignore [bad-argument-type]
             size=(input_mask_res, input_mask_res),
             mode="bilinear",
             align_corners=False,
@@ -2737,6 +2778,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
             # add all objects at once
             # NOTE: In the current implementation, add_new_masks also runs the memory encoder
             # the non-overlapping constraint is enforced
+            # pyrefly: ignore [not-callable]
             self.tracker.add_new_masks(
                 inference_state=new_sam2_state,
                 frame_idx=frame_idx,
@@ -2747,6 +2789,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
         else:
             # add object one by one
             for new_obj_id, new_mask in zip(new_obj_ids, new_obj_masks):
+                # pyrefly: ignore [not-callable]
                 self.tracker.add_new_mask(
                     inference_state=new_sam2_state,
                     frame_idx=frame_idx,
@@ -2755,6 +2798,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
                     add_mask_to_memory=True,
                 )
         # NOTE: we skip enforcing the non-overlapping constraint **globally** when adding new objects.
+        # pyrefly: ignore [not-callable]
         self.tracker.propagate_in_video_preflight(new_sam2_state, run_mem_encoder=True)
 
         return tracker_states_local
@@ -2772,6 +2816,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
             for sam2_inference_state in tracker_states_local_before_removal:
                 # we try to remove `obj_id` on every inference state with `strict=False`
                 # it will not do anything if an inference state doesn't contain `obj_id`
+                # pyrefly: ignore [not-callable]
                 new_obj_ids, _ = self.tracker.remove_objects(
                     sam2_inference_state, obj_ids, strict=False, need_output=False
                 )

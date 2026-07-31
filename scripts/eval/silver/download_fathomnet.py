@@ -9,7 +9,7 @@ from pathlib import Path
 
 import requests
 
-# pyre-fixme[21]: Could not find module `fathomnet.api`.
+# pyrefly: ignore [missing-import]
 from fathomnet.api import images
 from tqdm import tqdm
 

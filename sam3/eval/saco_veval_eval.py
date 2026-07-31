@@ -38,11 +38,9 @@ class VEvalEvaluator:
         video_np_results = defaultdict(dict)
         for evaluator in self.evaluators:
             d_res, v_np_res = evaluator.evaluate(pred_file)
-            # pyre-fixme[6]: For 1st argument expected `SupportsKeysAndGetItem[Any,
-            #  Any]` but got `Union[Dict[Any, Any], str]`.
+            # pyrefly: ignore [no-matching-overload]
             dataset_results.update(d_res)
-            # pyre-fixme[16]: Item `str` of `dict[Any, Any] | str` has no attribute
-            #  `items`.
+            # pyrefly: ignore [missing-attribute]
             for (video_id, category_id), res in v_np_res.items():
                 video_np_results[(video_id, category_id)].update(res)
 

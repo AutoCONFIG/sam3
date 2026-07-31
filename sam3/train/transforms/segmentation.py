@@ -161,7 +161,10 @@ class DecodeRle:
                         warning_shown = True
 
                     query.semantic_target = F.resize(
-                        query.semantic_target[None], imgId2size[query.image_id]
+                        # pyrefly: ignore [bad-argument-type]
+                        query.semantic_target[None],
+                        # pyrefly: ignore [bad-argument-type]
+                        imgId2size[query.image_id],
                     ).squeeze(0)
 
                 assert tuple(query.semantic_target.shape) == imgId2size[query.image_id]

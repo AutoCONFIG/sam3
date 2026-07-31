@@ -59,11 +59,11 @@ from torch.utils import _pytree as pytree
 pytree.register_pytree_node(
     NestedTensor,
     lambda x: ([x.tensors, x.mask], None),
+    # pyrefly: ignore [bad-index]
     lambda values, _: NestedTensor(values[0], values[1]),
 )
 
 
-# pyre-fixme[10]: Name `Tensor` is used but not defined.
 def interpolate(
     input, size=None, scale_factor=None, mode="nearest", align_corners=None
 ):

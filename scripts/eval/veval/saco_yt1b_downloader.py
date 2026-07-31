@@ -9,7 +9,7 @@ from functools import partial
 
 import pandas as pd
 
-# pyre-fixme[21]: Could not find module `saco_yt1b_frame_prep_util`.
+# pyrefly: ignore [missing-import]
 from saco_yt1b_frame_prep_util import YtVideoPrep
 from tqdm import tqdm
 

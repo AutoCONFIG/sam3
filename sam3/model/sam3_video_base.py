@@ -38,11 +38,16 @@ class MaskletConfirmationStatus(Enum):
 class RealizedAssociateDetTrkresult:
     # pyre-fixme[11]: Annotation `array` is not defined as a type.
     new_det_fa_inds: np.array
+    # pyrefly: ignore [not-a-type]
     unmatched_trk_obj_ids: np.array
+    # pyrefly: ignore [not-a-type]
     det_to_matched_trk_obj_ids: Dict[int, np.array]
     trk_id_to_max_iou_high_conf_det: Dict[int, int]
+    # pyrefly: ignore [not-a-type]
     empty_trk_obj_ids: np.array
+    # pyrefly: ignore [not-a-type]
     new_det_obj_ids: Optional[np.array] = None
+    # pyrefly: ignore [not-a-type]
     new_det_gpu_ids: Optional[np.array] = None
     num_obj_dropped_due_to_limit: Optional[int] = None
 
@@ -467,6 +472,7 @@ class Sam3VideoBase(nn.Module):
             reverse=reverse,
             det_out=det_out,
             tracker_states_local=tracker_states_local,
+            # pyrefly: ignore [bad-argument-type]
             tracker_update_plan=tracker_update_plan,
             orig_vid_height=orig_vid_height,
             orig_vid_width=orig_vid_width,
@@ -484,10 +490,13 @@ class Sam3VideoBase(nn.Module):
                 tracker_low_res_masks_global=tracker_low_res_masks_global,
                 tracker_obj_scores_global=tracker_obj_scores_global,
                 tracker_metadata_prev=tracker_metadata_prev,
+                # pyrefly: ignore [bad-argument-type]
                 tracker_update_plan=tracker_update_plan,
                 orig_vid_height=orig_vid_height,
                 orig_vid_width=orig_vid_width,
+                # pyrefly: ignore [bad-argument-type]
                 reconditioned_obj_ids=reconditioned_obj_ids,
+                # pyrefly: ignore [bad-argument-type]
                 det_to_matched_trk_obj_ids=det_to_matched_trk_obj_ids,
             )
             obj_id_to_score = tracker_metadata_new["obj_id_to_score"]
@@ -928,6 +937,7 @@ class Sam3VideoBase(nn.Module):
             #  always defined.
             and len(trk_id_to_max_iou_high_conf_det) > 0
         ):
+            # pyrefly: ignore [missing-attribute]
             for trk_obj_id, det_idx in trk_id_to_max_iou_high_conf_det.items():
                 det_box = det_out["bbox"][det_idx]
                 det_score = det_out["scores"][det_idx]
@@ -1075,6 +1085,7 @@ class Sam3VideoBase(nn.Module):
             )
         # for removed objects, we set their scores to a very low value (-1e4) but still
         # keep them in "obj_id_to_score" (it's easier to handle outputs this way)
+        # pyrefly: ignore [not-iterable]
         for obj_id in obj_ids_newly_removed:
             tracker_metadata_new["obj_id_to_score"][obj_id] = -1e4
             tracker_metadata_new["obj_id_to_tracker_score_frame_wise"][frame_idx][
@@ -1357,6 +1368,7 @@ class Sam3VideoBase(nn.Module):
 
         # pyre-fixme[16]: `List` has no attribute `unsqueeze`.
         last_occ_expanded_i = last_occluded.unsqueeze(1)  # (N, 1)
+        # pyrefly: ignore [missing-attribute]
         last_occ_expanded_j = last_occluded.unsqueeze(0)  # (1, N)
         # Suppress most recently occluded
         cmp_op = torch.gt if not reverse else torch.lt
@@ -1455,7 +1467,9 @@ class Sam3VideoBase(nn.Module):
             assert isinstance(out_obj_ids, list)
             # pyre-fixme[61]: `out_obj_ids` is undefined, or not always defined.
             obj_ids_local.extend(out_obj_ids)
+            # pyrefly: ignore [unbound-name]
             low_res_masks_list.append(out_low_res_masks.squeeze(1))
+            # pyrefly: ignore [unbound-name]
             obj_scores_list.append(out_obj_scores.squeeze(1))
 
         # concatenate the output masklets from all local inference states

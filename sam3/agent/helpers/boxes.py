@@ -132,6 +132,7 @@ class BoxMode(IntEnum):
                 )
 
         if single_box:
+            # pyrefly: ignore [bad-argument-type]
             return original_type(arr.flatten().tolist())
         if is_numpy:
             return arr.numpy()

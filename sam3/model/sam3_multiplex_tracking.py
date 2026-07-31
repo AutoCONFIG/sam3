@@ -1758,7 +1758,9 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
         # set the model to single GPU for benchmark evaluation (to be compatible with trainer)
         orig_rank = self.rank
         orig_world_size = self.world_size
+        # pyrefly: ignore [bad-argument-type]
         self.rank = self.detector.rank = 0
+        # pyrefly: ignore [bad-argument-type]
         self.world_size = self.detector.world_size = 1
 
         # get data
@@ -1810,7 +1812,9 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
         preds = self.prep_for_evaluator(input.raw_images, tracking_res, scores_labels)
 
         # revert the model to the original GPU and rank
+        # pyrefly: ignore [bad-argument-type]
         self.rank = self.detector.rank = orig_rank
+        # pyrefly: ignore [bad-argument-type]
         self.world_size = self.detector.world_size = orig_world_size
         return {video_id: preds}
 
@@ -1866,6 +1870,7 @@ class Sam3MultiplexTrackingProd(Sam3MultiplexTracking):
         }
 
     @torch.inference_mode()
+    # pyrefly: ignore [bad-override]
     def propagate_in_video(
         self,
         inference_state,
@@ -2287,8 +2292,7 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
         )
 
     @torch.inference_mode()
-    # pyre-fixme[14]: `propagate_in_video` overrides method defined in
-    #  `Sam3MultiplexTracking` inconsistently.
+    # pyrefly: ignore [bad-override]
     def propagate_in_video(
         self,
         inference_state,
@@ -2359,6 +2363,7 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
                 inference_state, obj_ids
             )
             for sam2_state in tracker_states_local:
+                # pyrefly: ignore [not-callable]
                 self.tracker.propagate_in_video_preflight(
                     sam2_state, run_mem_encoder=True
                 )
@@ -2369,8 +2374,6 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
                 self._prepare_backbone_feats(inference_state, frame_idx, reverse)
                 obj_ids_local, low_res_masks_local, sam2_scores_local = (
                     self._propogate_tracker_one_frame_local_gpu(
-                        # pyre-fixme[61]: `tracker_states_local` is undefined, or
-                        #  not always defined.
                         tracker_states_local,
                         frame_idx=frame_idx,
                         reverse=reverse,

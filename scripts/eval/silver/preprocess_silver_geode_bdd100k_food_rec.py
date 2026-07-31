@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-# pyre-fixme[21]: Could not find module `utils`.
+# pyrefly: ignore [missing-import]
 import utils
 from tqdm import tqdm
 

@@ -17,7 +17,7 @@ from multiprocessing import Pool
 from PIL import Image
 from tqdm import tqdm
 
-# pyre-fixme[21]: Could not find module `utils`.
+# pyrefly: ignore [missing-import]
 from utils import (
     annotation_files,
     config,

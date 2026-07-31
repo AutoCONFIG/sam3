@@ -441,12 +441,11 @@ class FusedMaskEncoder(MaskEncoder):
         self.fuser = fuser
         self.out_proj = nn.Identity()
         if out_dim != in_dim:
+            # pyrefly: ignore [bad-assignment]
             self.out_proj = nn.Conv2d(in_dim, out_dim, kernel_size=1)
         self.pix_feat_proj = nn.Conv2d(in_dim, in_dim, kernel_size=1)
 
     @override
-    # pyre-fixme[14]: `forward` overrides method defined in `MaskEncoder`
-    #  inconsistently.
     def forward(
         self,
         masks: torch.Tensor,
@@ -506,7 +505,7 @@ class SequenceGeometryEncoder(nn.Module):
         roi_size: int = 7,  # for boxes pool
         add_cls: bool = True,
         add_post_encode_proj: bool = True,
-        # pyre-fixme[9]: mask_encoder has type `MaskEncoder`; used as `None`.
+        # pyrefly: ignore [bad-function-definition]
         mask_encoder: MaskEncoder = None,
         add_mask_label: bool = False,
         use_act_ckpt: bool = False,
@@ -569,6 +568,7 @@ class SequenceGeometryEncoder(nn.Module):
 
         self.img_pre_norm = nn.Identity()
         if self.points_pool_project is not None or self.boxes_pool_project is not None:
+            # pyrefly: ignore [bad-assignment]
             self.img_pre_norm = nn.LayerNorm(self.d_model)
 
         self.encode = None
@@ -688,7 +688,7 @@ class SequenceGeometryEncoder(nn.Module):
         masks: torch.Tensor,
         attn_mask: torch.Tensor,
         mask_labels: torch.Tensor,
-        # pyre-fixme[9]: img_feats has type `Tensor`; used as `None`.
+        # pyrefly: ignore [bad-function-definition]
         img_feats: torch.Tensor = None,
     ):
         n_masks, bs = masks.shape[:2]
@@ -735,6 +735,7 @@ class SequenceGeometryEncoder(nn.Module):
             else torch.zeros_like(seq_first_img_feats)
         )
 
+        # pyrefly: ignore [not-callable]
         if self.points_pool_project or self.boxes_pool_project:
             assert len(img_feats) == len(img_sizes)
             cur_img_feat = img_feats[-1]
@@ -760,21 +761,24 @@ class SequenceGeometryEncoder(nn.Module):
             labels_br = geo_prompt.box_labels + 4
 
             # Append to the existing points
+            # pyrefly: ignore [bad-unpacking]
             points, _ = concat_padded_sequences(
                 points, points_mask, top_left, boxes_mask
             )
+            # pyrefly: ignore [bad-unpacking]
             points_labels, points_mask = concat_padded_sequences(
                 points_labels.unsqueeze(-1),
                 points_mask,
-                # pyre-fixme[16]: `int` has no attribute `unsqueeze`.
                 labels_tl.unsqueeze(-1),
                 boxes_mask,
             )
             points_labels = points_labels.squeeze(-1)
 
+            # pyrefly: ignore [bad-unpacking]
             points, _ = concat_padded_sequences(
                 points, points_mask, bottom_right, boxes_mask
             )
+            # pyrefly: ignore [bad-unpacking]
             points_labels, points_mask = concat_padded_sequences(
                 points_labels.unsqueeze(-1),
                 points_mask,
@@ -798,6 +802,7 @@ class SequenceGeometryEncoder(nn.Module):
                 img_feats=img_feats,
             )
 
+            # pyrefly: ignore [bad-unpacking]
             final_embeds, final_mask = concat_padded_sequences(
                 final_embeds, final_mask, boxes_embeds, boxes_mask
             )
@@ -818,6 +823,7 @@ class SequenceGeometryEncoder(nn.Module):
             cls_mask = torch.zeros(
                 bs, 1, dtype=final_mask.dtype, device=final_mask.device
             )
+            # pyrefly: ignore [bad-unpacking]
             final_embeds, final_mask = concat_padded_sequences(
                 final_embeds, final_mask, cls, cls_mask
             )
@@ -837,11 +843,12 @@ class SequenceGeometryEncoder(nn.Module):
             final_embeds = self.encode_norm(final_embeds)
         # Finally, concat mask embeddings if any
         if masks is not None and self.mask_encoder is not None:
+            # pyrefly: ignore [bad-unpacking]
             final_embeds, final_mask = concat_padded_sequences(
-                # pyre-fixme[61]: `masks_embed` is undefined, or not always defined.
+                # pyrefly: ignore [unbound-name]
                 final_embeds,
                 final_mask,
-                # pyre-fixme[61]: `masks_embed` is undefined, or not always defined.
+                # pyrefly: ignore [unbound-name]
                 masks_embed,
                 masks_mask,
             )

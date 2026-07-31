@@ -8,7 +8,7 @@ import subprocess
 
 import pandas as pd
 
-# pyre-fixme[21]: Could not find module `yt_dlp`.
+# pyrefly: ignore [missing-source-for-stubs]
 import yt_dlp
 
 logger = logging.getLogger(__name__)

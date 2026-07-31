@@ -58,11 +58,13 @@ class SAMOutput(TypedDict, total=True):
     low_res_masks: torch.Tensor
     high_res_masks: torch.Tensor
     object_score_logits: torch.Tensor
+    # pyrefly: ignore [invalid-annotation, not-a-type]
     obj_ptr: NotRequired[torch.Tensor]  # [num_objects, C], in data space
 
 
 class StageOutput(TypedDict, total=False):
     # metadata
+    # pyrefly: ignore [invalid-annotation, not-a-type]
     conditioning_objects: Required[set[int]]
 
     # The outputs from a single stage; could be used as memory
@@ -893,6 +895,7 @@ class VideoTrackingMultiplex(nn.Module):
                 obj_ptr = self.obj_ptr_proj(sam_output_token)
 
             if self.pred_obj_scores and self.use_no_obj_ptr:
+                # pyrefly: ignore [unbound-name]
                 lambda_is_obj_appearing = is_obj_appearing.float()
                 if self.use_linear_no_obj_ptr:
                     obj_ptr = lambda_is_obj_appearing * obj_ptr + (
@@ -915,6 +918,7 @@ class VideoTrackingMultiplex(nn.Module):
                         obj_ptr + (1 - lambda_is_obj_appearing) * selected_no_obj_ptr
                     )
 
+        # pyrefly: ignore [bad-typed-dict-key]
         outputs: SAMOutput = {
             "low_res_multimasks": low_res_multimasks,
             "high_res_multimasks": high_res_multimasks,
@@ -1003,6 +1007,7 @@ class VideoTrackingMultiplex(nn.Module):
                         obj_ptr + (1 - lambda_is_obj_appearing) * selected_no_obj_ptr
                     )
 
+        # pyrefly: ignore [bad-typed-dict-key]
         outputs: SAMOutput = {
             "low_res_multimasks": low_res_masks,
             "high_res_multimasks": high_res_masks,
@@ -1462,7 +1467,9 @@ class VideoTrackingMultiplex(nn.Module):
                     # image features are in (HW)BC
                     image_feat = prev["image_features"].cuda()
                     image_pos_embed = prev["image_pos_enc"].cuda() + tpos_enc
+                    # pyrefly: ignore [unbound-name]
                     to_cat_image_feat.append(image_feat)
+                    # pyrefly: ignore [unbound-name]
                     to_cat_image_pos_embed.append(image_pos_embed)
 
                 to_cat_prompt_pos_embed.append(maskmem_enc)
@@ -1862,6 +1869,7 @@ class VideoTrackingMultiplex(nn.Module):
                 # Retrieve image features according to img_ids (if they are already computed).
                 current_image = input.img_batch.tensors[img_ids]
                 current_backbone_features = {}
+                # pyrefly: ignore [unbound-name]
                 for neck_k, neck_out in backbone_features.items():
                     current_backbone_features[neck_k] = {
                         "vision_feats": [
@@ -2069,7 +2077,10 @@ class VideoTrackingMultiplex(nn.Module):
             # pix_feat = pix_feat.view(-1, self.hidden_dim, *interactive_feat_sizes[-1])
             # use no_mem_embed here as well to better align first-frame mask input vs point input
             interactive_pix_feat = self._get_interactive_pix_mem(
-                interactive_vision_feats, interactive_feat_sizes
+                # pyrefly: ignore [bad-argument-type]
+                interactive_vision_feats,
+                # pyrefly: ignore [bad-argument-type]
+                interactive_feat_sizes,
             )
             sam_outputs = self._use_mask_as_output(
                 backbone_features=interactive_pix_feat,
@@ -2351,6 +2362,7 @@ class VideoTrackingMultiplex(nn.Module):
                     high_res_multimasks = high_res_multimasks.clone()
                     ious = ious.clone()
                     object_score_logits = object_score_logits.clone()
+                    # pyrefly: ignore [unbound-name]
                     obj_ptr = obj_ptr.clone() if self.use_obj_ptrs_in_encoder else None
 
                 # Update masks for the interacted objects
@@ -2470,10 +2482,13 @@ class VideoTrackingMultiplex(nn.Module):
                 multiplex_state=multiplex_state,
             )
             current_out["maskmem_features"] = maskmem_features
+            # pyrefly: ignore [bad-assignment]
             current_out["maskmem_pos_enc"] = maskmem_pos_enc
 
         if self.save_image_features:
+            # pyrefly: ignore [unsupported-operation]
             current_out["image_features"] = propagation_vision_feats[-1]
+            # pyrefly: ignore [unsupported-operation]
             current_out["image_pos_enc"] = propagation_vision_pos_embeds[-1]
 
         # this is to avoid recomputing some of these features for add_new_masks_to_existing_state
@@ -2481,11 +2496,17 @@ class VideoTrackingMultiplex(nn.Module):
         if need_aux_output:
             if interactive_pix_feat is None:
                 interactive_pix_feat = self._get_interactive_pix_mem(
-                    interactive_vision_feats, interactive_feat_sizes
+                    # pyrefly: ignore [bad-argument-type]
+                    interactive_vision_feats,
+                    # pyrefly: ignore [bad-argument-type]
+                    interactive_feat_sizes,
                 )
             aux_output["interactive_pix_feat"] = interactive_pix_feat
+            # pyrefly: ignore [unsupported-operation]
             aux_output["interactive_high_res_features"] = interactive_high_res_features
+            # pyrefly: ignore [unsupported-operation]
             aux_output["propagation_vision_feats"] = propagation_vision_feats
+            # pyrefly: ignore [unsupported-operation]
             aux_output["propagation_feat_sizes"] = propagation_feat_sizes
 
         return current_out, aux_output
@@ -3249,6 +3270,7 @@ class VideoTrackingDynamicMultiplex(VideoTrackingMultiplex):
         if self.use_obj_ptrs_in_encoder:
             # Merge the object pointers. Note that the pointers in SAMOutput are in the data space,
             # while those in StageOutput are in the mux space.
+            # pyrefly: ignore [unbound-name]
             new_pointers = mask_output["obj_ptr"].to(existing_pointers.dtype)
             # pyre-fixme[61]: `existing_pointers` is undefined, or not always defined.
             combined_pointers = torch.cat([existing_pointers, new_pointers], dim=0)
@@ -3275,6 +3297,7 @@ class VideoTrackingDynamicMultiplex(VideoTrackingMultiplex):
                 multiplex_state=multiplex_state,
             )
             prev_output["maskmem_features"] = maskmem_features
+            # pyrefly: ignore [bad-assignment]
             prev_output["maskmem_pos_enc"] = maskmem_pos_enc
             if self.save_image_features:
                 # They should already be in the state; no modification is needed
@@ -3377,6 +3400,7 @@ class VideoTrackingDynamicMultiplex(VideoTrackingMultiplex):
         if self.use_obj_ptrs_in_encoder:
             # Merge the object pointers. Note that the pointers in SAMOutput are in the data space,
             # while those in StageOutput are in the mux space.
+            # pyrefly: ignore [unbound-name]
             new_pointers = mask_output["obj_ptr"].to(existing_pointers.dtype)
             # pyre-fixme[61]: `existing_pointers` is undefined, or not always defined.
             existing_pointers[obj_idxs_in_mask] = new_pointers
@@ -3404,6 +3428,7 @@ class VideoTrackingDynamicMultiplex(VideoTrackingMultiplex):
                 multiplex_state=multiplex_state,
             )
             prev_output["maskmem_features"] = maskmem_features
+            # pyrefly: ignore [bad-assignment]
             prev_output["maskmem_pos_enc"] = maskmem_pos_enc
             if self.save_image_features:
                 # They should already be in the state; no modification is needed
@@ -3492,6 +3517,7 @@ class VideoTrackingDynamicMultiplex(VideoTrackingMultiplex):
 
         return current_out
 
+    # pyrefly: ignore [bad-override]
     def forward_tracking(
         self,
         backbone_out,
@@ -3552,6 +3578,7 @@ class VideoTrackingDynamicMultiplex(VideoTrackingMultiplex):
                 # Retrieve image features according to img_ids (if they are already computed).
                 current_image = input.img_batch.tensors[img_ids]
                 current_backbone_features = {}
+                # pyrefly: ignore [unbound-name]
                 for neck_k, neck_out in backbone_features.items():
                     current_backbone_features[neck_k] = {
                         "vision_feats": [
@@ -3695,8 +3722,11 @@ class VideoTrackingDynamicMultiplex(VideoTrackingMultiplex):
             # pyre-fixme[16]: `Optional` has no attribute `__getitem__`.
             last_mask = all_frame_outputs[-1]["pred_masks"]
 
+            # pyrefly: ignore [missing-attribute]
             shape = last_mask.shape[1:]
+            # pyrefly: ignore [missing-attribute]
             dtype = last_mask.dtype
+            # pyrefly: ignore [missing-attribute]
             device = last_mask.device
             for stage_i, frame_out in enumerate(all_frame_outputs):
                 if frame_out is None:
@@ -3708,14 +3738,18 @@ class VideoTrackingDynamicMultiplex(VideoTrackingMultiplex):
                     continue
 
                 pred_mask = frame_out["pred_masks"]
+                # pyrefly: ignore [missing-attribute]
                 if pred_mask.shape[0] < num_objects:
+                    # pyrefly: ignore [missing-attribute]
                     shape = pred_mask.shape[
                         1:
                     ]  # might have a different shape, e.g., input mask
                     frame_out["pred_masks"] = torch.cat(
+                        # pyrefly: ignore [bad-argument-type]
                         [
                             pred_mask,
                             torch.zeros(
+                                # pyrefly: ignore [missing-attribute]
                                 (num_objects - pred_mask.shape[0], *shape),
                                 device=device,
                                 dtype=dtype,

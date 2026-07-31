@@ -186,6 +186,7 @@ class SAM3InteractiveImagePredictor(nn.Module):
             raise RuntimeError(
                 "An image must be set with .set_image_batch(...) before mask prediction."
             )
+        # pyrefly: ignore [unsupported-operation]
         num_images = len(self._features["image_embed"])
         all_masks = []
         all_ious = []
@@ -412,9 +413,11 @@ class SAM3InteractiveImagePredictor(nn.Module):
         )  # multi object prediction
         high_res_features = [
             feat_level[img_idx].unsqueeze(0)
+            # pyrefly: ignore [unsupported-operation]
             for feat_level in self._features["high_res_feats"]
         ]
         low_res_masks, iou_predictions, _, _ = self.model.sam_mask_decoder(
+            # pyrefly: ignore [unsupported-operation]
             image_embeddings=self._features["image_embed"][img_idx].unsqueeze(0),
             image_pe=self.model.sam_prompt_encoder.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
@@ -426,7 +429,10 @@ class SAM3InteractiveImagePredictor(nn.Module):
 
         # Upscale the masks to the original image resolution
         masks = self._transforms.postprocess_masks(
-            low_res_masks, self._orig_hw[img_idx]
+            # pyrefly: ignore [unsupported-operation]
+            low_res_masks,
+            # pyrefly: ignore [unsupported-operation]
+            self._orig_hw[img_idx],
         )
         low_res_masks = torch.clamp(low_res_masks, -32.0, 32.0)
         if not return_logits:

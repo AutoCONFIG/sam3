@@ -10,10 +10,10 @@ import sys
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from pathlib import Path
 
-# pyre-fixme[21]: Could not find module `yt_dlp`.
+# pyrefly: ignore [missing-source-for-stubs]
 import yt_dlp
 
-# pyre-fixme[21]: Could not find module `utils`.
+# pyrefly: ignore [missing-import]
 from utils import (
     annotation_files,
     config,

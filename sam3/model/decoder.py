@@ -117,19 +117,25 @@ class TransformerDecoderLayer(nn.Module):
                 # we only apply self attention to the first half of the queries
                 # pyre-fixme[16]: `Optional` has no attribute `shape`.
                 assert tgt.shape[0] % 2 == 0
+                # pyrefly: ignore [missing-attribute]
                 num_o2o_queries = tgt.shape[0] // 2
                 # pyre-fixme[16]: `Optional` has no attribute `__getitem__`.
                 tgt_o2o = tgt[:num_o2o_queries]
+                # pyrefly: ignore [unsupported-operation]
                 tgt_query_pos_o2o = tgt_query_pos[:num_o2o_queries]
+                # pyrefly: ignore [unsupported-operation]
                 tgt_o2m = tgt[num_o2o_queries:]
             else:
                 tgt_o2o = tgt
                 tgt_query_pos_o2o = tgt_query_pos
 
             if presence_token is not None:
+                # pyrefly: ignore [bad-argument-type]
                 tgt_o2o = torch.cat([presence_token, tgt_o2o], dim=0)
                 tgt_query_pos_o2o = torch.cat(
-                    [torch.zeros_like(presence_token), tgt_query_pos_o2o], dim=0
+                    # pyrefly: ignore [bad-argument-type]
+                    [torch.zeros_like(presence_token), tgt_query_pos_o2o],
+                    dim=0,
                 )
                 tgt_query_pos = torch.cat(
                     # pyre-fixme[6]: For 1st argument expected `Union[List[Tensor],
@@ -163,6 +169,7 @@ class TransformerDecoderLayer(nn.Module):
             tgt = self.catext_norm(tgt)
 
         if presence_token is not None:
+            # pyrefly: ignore [unsupported-operation]
             presence_token_mask = torch.zeros_like(cross_attn_mask[:, :1, :])
             cross_attn_mask = torch.cat(
                 # pyre-fixme[6]: For 1st argument expected `Union[List[Tensor],
@@ -264,7 +271,9 @@ class TransformerDecoder(nn.Module):
             self.instance_query_embed = nn.Embedding(num_instances, d_model)
         self.box_refine = box_refine
         if box_refine:
+            # pyrefly: ignore [bad-argument-type]
             nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
+            # pyrefly: ignore [bad-argument-type]
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
 
             self.reference_points = nn.Embedding(num_queries, 4)
@@ -459,20 +468,29 @@ class TransformerDecoder(nn.Module):
 
         apply_dac = apply_dac if apply_dac is not None else self.dac
         if apply_dac:
-            assert (tgt.shape[0] == self.num_queries) or (
-                self.use_instance_query
-                and (tgt.shape[0] == self.instance_query_embed.num_embeddings)
+            assert (
+                (tgt.shape[0] == self.num_queries)
+                or (
+                    self.use_instance_query
+                    and (
+                        tgt.shape[0]
+                        == self.instance_query_embed.num_embeddings  # pyrefly: ignore [missing-attribute]
+                    )  # pyrefly: ignore [missing-attribute]
+                )
             )
 
             tgt = tgt.repeat(2, 1, 1)
             # note that we don't tile tgt_mask, since DAC doesn't
             # use self-attention in o2m queries
             if reference_boxes is not None:
-                assert (reference_boxes.shape[0] == self.num_queries) or (
-                    self.use_instance_query
-                    and (
-                        reference_boxes.shape[0]
-                        == self.instance_query_embed.num_embeddings
+                assert (
+                    (reference_boxes.shape[0] == self.num_queries)
+                    or (
+                        self.use_instance_query
+                        and (
+                            reference_boxes.shape[0]
+                            == self.instance_query_embed.num_embeddings  # pyrefly: ignore [missing-attribute]
+                        )
                     )
                 )
                 reference_boxes = reference_boxes.repeat(2, 1, 1)
@@ -513,6 +531,7 @@ class TransformerDecoder(nn.Module):
 
         for layer_idx, layer in enumerate(self.layers):
             reference_points_input = (
+                # pyrefly: ignore [unsupported-operation]
                 reference_boxes[:, :, None]
                 # pyre-fixme[6]: For 1st argument expected `Union[List[Tensor],
                 #  tuple[Tensor, ...]]` but got `List[Optional[Tensor]]`.
@@ -708,6 +727,7 @@ class TransformerEncoderCrossAttention(nn.Module):
             # pyre-fixme[16]: `Optional` has no attribute `transpose`.
             src_pos = src_pos.transpose(0, 1)
             prompt = prompt.transpose(0, 1)
+            # pyrefly: ignore [missing-attribute]
             prompt_pos = prompt_pos.transpose(0, 1)
 
         for layer in self.layers:
@@ -733,7 +753,9 @@ class TransformerEncoderCrossAttention(nn.Module):
 
         if self.batch_first:
             # Convert back to seq first
+            # pyrefly: ignore [unbound-name]
             normed_output = normed_output.transpose(0, 1)
+            # pyrefly: ignore [missing-attribute]
             src_pos = src_pos.transpose(0, 1)
 
         return {
@@ -1094,6 +1116,7 @@ class SimpleRoPEAttention(nn.Module):
         w = h = math.sqrt(q.shape[-2])
         self.freqs_cis = self.freqs_cis.to(q.device)
         if self.freqs_cis.shape[0] != q.shape[-2]:
+            # pyrefly: ignore [bad-argument-type]
             self.freqs_cis = self.compute_cis(end_x=w, end_y=h, device=q.device)
             if self.use_rope_real:
                 self.freqs_cis_real = self.freqs_cis.real
@@ -1274,6 +1297,7 @@ class DecoupledTransformerDecoderLayerv2(nn.Module):
 
     def forward(self, *args: Any, **kwds: Any) -> torch.Tensor:
         if self.pre_norm:
+            # pyrefly: ignore [bad-return]
             return self.forward_pre(*args, **kwds)
         raise NotImplementedError
 
@@ -1336,8 +1360,10 @@ class TransformerEncoderDecoupledCrossAttention(nn.Module):
             src_pos = src_pos.transpose(0, 1)
             image = image.transpose(0, 1)
             memory = memory.transpose(0, 1)
+            # pyrefly: ignore [missing-attribute]
             memory_pos = memory_pos.transpose(0, 1)
             memory_image = memory_image.transpose(0, 1)
+            # pyrefly: ignore [missing-attribute]
             memory_image_pos = memory_image_pos.transpose(0, 1)
 
         if memory_image.shape[1] != memory.shape[1]:
@@ -1359,14 +1385,17 @@ class TransformerEncoderDecoupledCrossAttention(nn.Module):
             )
             if memory_image_pos is not None:
                 assert (
-                    memory_pos.shape[1] - memory_image_pos.shape[1]
+                    memory_pos.shape[1]  # pyrefly: ignore [missing-attribute]
+                    - memory_image_pos.shape[1]  # pyrefly: ignore [missing-attribute]
                 ) == num_obj_ptr_tokens, (
+                    # pyrefly: ignore [missing-attribute]
                     f"{memory_pos.shape[1]} - {memory_image_pos.shape[1]} != {num_obj_ptr_tokens}"
                 )
                 # tpos is the same in the batch anyway; note that memory_image always has a batch size of 1
                 memory_image_pos = torch.cat(
                     [
                         memory_image_pos,
+                        # pyrefly: ignore [unsupported-operation]
                         memory_pos[0:1, -num_obj_ptr_tokens:],
                     ],
                     dim=1,
@@ -1394,6 +1423,7 @@ class TransformerEncoderDecoupledCrossAttention(nn.Module):
         if self.batch_first:
             # Convert back to seq first
             normed_output = normed_output.transpose(0, 1)
+            # pyrefly: ignore [missing-attribute]
             src_pos = src_pos.transpose(0, 1)
 
         return {

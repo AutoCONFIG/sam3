@@ -6,7 +6,7 @@ import base64
 import os
 from typing import Any, Optional
 
-# pyre-fixme[21]: Could not find module `openai`.
+# pyrefly: ignore [missing-import]
 from openai import OpenAI
 
 

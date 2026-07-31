@@ -636,7 +636,6 @@ def draw_masks_to_frame(
                 cv2.CHAIN_APPROX_NONE,
             )
         else:
-            # pyre-fixme[23]: Unable to unpack 2 values, 3 were expected.
             _, contours, _ = cv2.findContours(
                 np.array(mask, dtype=np.uint8).copy(),
                 cv2.RETR_TREE,
@@ -713,6 +712,7 @@ def get_all_annotations_for_frame(
         get_media_dir(media_dir=media_dir, dataset=dataset), file_name
     )
     frame = cv2.imread(file_path)
+    # pyrefly: ignore [no-matching-overload]
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     # Get the masks and noun phrases annotated in this video in this frame

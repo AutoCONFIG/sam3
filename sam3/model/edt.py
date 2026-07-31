@@ -153,7 +153,7 @@ def edt_triton(data: torch.Tensor):
         parabola_inter,
         H,
         W,
-        # pyre-fixme[6]: For 7th argument expected `constexpr` but got `bool`.
+        # pyrefly: ignore [bad-argument-type]
         horizontal=True,
     )
 
@@ -170,7 +170,7 @@ def edt_triton(data: torch.Tensor):
         parabola_inter,
         H,
         W,
-        # pyre-fixme[6]: For 7th argument expected `constexpr` but got `bool`.
+        # pyrefly: ignore [bad-argument-type]
         horizontal=False,
     )
     # don't forget to take sqrt at the end
