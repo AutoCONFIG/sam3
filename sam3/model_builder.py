@@ -74,10 +74,14 @@ def _create_position_encoding(precompute_resolution=None):
     )
 
 
-def _create_vit_backbone(compile_mode=None, use_fa3=False, use_rope_real=False):
-    """Create ViT backbone for visual feature extraction."""
+def _create_vit_backbone(compile_mode=None, use_fa3=False, use_rope_real=False, img_size=1008):
+    """Create ViT backbone for visual feature extraction.
+
+    img_size must be a multiple of patch_size*window_size (14*24=336) so that
+    windowed attention tiles evenly. Use 672 on low-VRAM GPUs (vs default 1008).
+    """
     return ViT(
-        img_size=1008,
+        img_size=img_size,
         pretrain_img_size=336,
         patch_size=14,
         embed_dim=1024,
@@ -820,21 +824,22 @@ def build_sam3_video_predictor(*model_args, gpus_to_use=None, **model_kwargs):
     )
 
 
-def _create_multiplex_maskmem_backbone(multiplex_count=16):
+def _create_multiplex_maskmem_backbone(multiplex_count=16, image_size=1008):
     """Create the multiplex memory encoder with per-object mask channels."""
+    feat_size = image_size // 14  # backbone stride
     position_encoding = PositionEmbeddingSine(
         num_pos_feats=256,
         normalize=True,
         scale=None,
         temperature=10000,
-        precompute_resolution=1008,
+        precompute_resolution=image_size,
     )
 
     mask_downsampler = SimpleMaskDownSampler(
         kernel_size=3,
         stride=2,
         padding=1,
-        interpol_size=[1152, 1152],
+        interpol_size=[feat_size * 16, feat_size * 16],
         multiplex_count=multiplex_count,
         starting_out_chan=4,
         input_channel_multiplier=2,
@@ -860,14 +865,15 @@ def _create_multiplex_maskmem_backbone(multiplex_count=16):
     return maskmem_backbone
 
 
-def _create_multiplex_transformer(use_fa3=False, use_rope_real=False):
+def _create_multiplex_transformer(use_fa3=False, use_rope_real=False, image_size=1008):
     """Create the decoupled transformer for multiplex memory attention."""
+    feat_size = image_size // 14
     self_attention_rope = SimpleRoPEAttention(
         d_model=256,
         num_heads=8,
         dropout_p=0.1,
         rope_theta=10000.0,
-        feat_sizes=[72, 72],
+        feat_sizes=[feat_size, feat_size],
         use_fa3=use_fa3,
         use_rope_real=use_rope_real,
     )
@@ -877,7 +883,7 @@ def _create_multiplex_transformer(use_fa3=False, use_rope_real=False):
         num_heads=8,
         dropout_p=0.1,
         rope_theta=10000.0,
-        feat_sizes=[72, 72],
+        feat_sizes=[feat_size, feat_size],
         rope_k_repeat=True,
         use_fa3=use_fa3,
         use_rope_real=use_rope_real,
@@ -918,12 +924,13 @@ def _create_multiplex_transformer(use_fa3=False, use_rope_real=False):
 
 
 def _create_multiplex_tri_backbone(
-    compile_mode=None, use_fa3=False, use_rope_real=False
+    compile_mode=None, use_fa3=False, use_rope_real=False, img_size=1008
 ):
     """Create the TriHead vision backbone for multiplex model."""
-    position_encoding = _create_position_encoding(precompute_resolution=1008)
+    position_encoding = _create_position_encoding(precompute_resolution=img_size)
     vit_backbone = _create_vit_backbone(
-        compile_mode=compile_mode, use_fa3=use_fa3, use_rope_real=use_rope_real
+        compile_mode=compile_mode, use_fa3=use_fa3, use_rope_real=use_rope_real,
+        img_size=img_size,
     )
     tri_neck = Sam3TriViTDetNeck(
         trunk=vit_backbone,
@@ -943,6 +950,7 @@ def build_sam3_multiplex_video_model(
     strict_state_dict_loading: bool = True,
     device="cuda" if torch.cuda.is_available() else "cpu",
     compile=False,
+    image_size: int = 1008,
 ):
     """
     Build SAM3 multiplex video tracking model.
@@ -961,13 +969,13 @@ def build_sam3_multiplex_video_model(
     """
     # Build multiplex-specific components
     maskmem_backbone = _create_multiplex_maskmem_backbone(
-        multiplex_count=multiplex_count
+        multiplex_count=multiplex_count, image_size=image_size
     )
     transformer = _create_multiplex_transformer(
-        use_fa3=use_fa3, use_rope_real=use_rope_real
+        use_fa3=use_fa3, use_rope_real=use_rope_real, image_size=image_size
     )
     tri_neck = _create_multiplex_tri_backbone(
-        compile_mode="max-autotune" if compile else None
+        compile_mode="max-autotune" if compile else None, img_size=image_size
     )
     backbone = TriHeadVisionOnly(
         visual=tri_neck,
@@ -987,7 +995,7 @@ def build_sam3_multiplex_video_model(
         transformer=transformer,
         maskmem_backbone=maskmem_backbone,
         multiplex_controller=multiplex_controller,
-        image_size=1008,
+        image_size=image_size,
         backbone_stride=14,
         num_maskmem=7,
         # Multiplex-specific settings
@@ -1079,6 +1087,7 @@ def build_sam3_multiplex_video_predictor(
     session_expiration_sec: int = 1200,
     default_output_prob_thresh: float = 0.5,
     async_loading_frames: bool = True,
+    image_size: int = 1008,
 ):
     """
     Build a fully-initialized Sam3MultiplexVideoPredictor.
@@ -1125,6 +1134,7 @@ def build_sam3_multiplex_video_predictor(
         use_rope_real=use_rope_real,
         compile=False,
         strict_state_dict_loading=False,
+        image_size=image_size,
     )
     del tracker_model.backbone
     # pyrefly: ignore [bad-assignment]
@@ -1140,7 +1150,8 @@ def build_sam3_multiplex_video_predictor(
 
     # Build detector
     tri_neck = _create_multiplex_tri_backbone(
-        compile_mode=None, use_fa3=use_fa3, use_rope_real=use_rope_real
+        compile_mode=None, use_fa3=use_fa3, use_rope_real=use_rope_real,
+        img_size=image_size,
     )
     text_encoder = _create_text_encoder(bpe_path)
     backbone = SAM3VLBackboneTri(scalp=0, visual=tri_neck, text=text_encoder)
@@ -1192,7 +1203,7 @@ def build_sam3_multiplex_video_predictor(
         max_num_kboxes=0,
         sprinkle_removal_area=0,
         is_multiplex=True,
-        image_size=1008,
+        image_size=image_size,
         image_mean=(0.5, 0.5, 0.5),
         image_std=(0.5, 0.5, 0.5),
         compile_model=compile,
@@ -1220,6 +1231,14 @@ def build_sam3_multiplex_video_predictor(
                     new_k = "tracker." + k[len("sam2_predictor.") :]
                 remapped_ckpt[new_k] = v
             ckpt = remapped_ckpt
+        # Drop RoPE position-encoding buffers tied to a specific resolution; keep
+        # the model's own precomputed ones (correct for the requested image_size).
+        if image_size != 1008:
+            rope_suffixes = ("freqs_cis", "freqs_cis_real", "freqs_cis_imag")
+            ckpt = {
+                k: v for k, v in ckpt.items()
+                if not any(k.split(".")[-1] == s for s in rope_suffixes)
+            }
         missing_keys, unexpected_keys = demo_model.load_state_dict(ckpt, strict=False)
         if missing_keys:
             print(f"Missing keys ({len(missing_keys)}): {missing_keys[:10]}...")
