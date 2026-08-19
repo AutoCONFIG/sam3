@@ -514,13 +514,15 @@ def _create_text_encoder(bpe_path: str) -> VETextEncoder:
 
 
 def _create_vision_backbone(
-    compile_mode=None, enable_inst_interactivity=True
+    compile_mode=None, enable_inst_interactivity=True, img_size=1008
 ) -> Sam3DualViTDetNeck:
     """Create SAM3 visual backbone with ViT and neck."""
     # Position encoding
-    position_encoding = _create_position_encoding(precompute_resolution=1008)
+    position_encoding = _create_position_encoding(precompute_resolution=img_size)
     # ViT backbone
-    vit_backbone: ViT = _create_vit_backbone(compile_mode=compile_mode)
+    vit_backbone: ViT = _create_vit_backbone(
+        compile_mode=compile_mode, img_size=img_size
+    )
     vit_neck: Sam3DualViTDetNeck = _create_vit_neck(
         position_encoding,
         vit_backbone,
@@ -540,8 +542,14 @@ def _create_sam3_transformer(
     return TransformerWrapper(encoder=encoder, decoder=decoder, d_model=256)
 
 
-def _load_checkpoint(model, checkpoint_path):
-    """Load model checkpoint from file."""
+def _load_checkpoint(model, checkpoint_path, drop_rope_buffers=False):
+    """Load model checkpoint from file.
+
+    drop_rope_buffers: drop resolution-dependent RoPE position-encoding
+    buffers (freqs_cis*) so a checkpoint saved at resolution 1008 can
+    initialize a model built at a different image_size (the model keeps
+    its own precomputed buffers).
+    """
     with g_pathmgr.open(checkpoint_path, "rb") as f:
         ckpt = torch.load(f, map_location="cpu", weights_only=True)
     if "model" in ckpt and isinstance(ckpt["model"], dict):
@@ -549,6 +557,13 @@ def _load_checkpoint(model, checkpoint_path):
     sam3_image_ckpt = {
         k.replace("detector.", ""): v for k, v in ckpt.items() if "detector" in k
     }
+    if drop_rope_buffers:
+        rope_suffixes = ("freqs_cis", "freqs_cis_real", "freqs_cis_imag")
+        sam3_image_ckpt = {
+            k: v
+            for k, v in sam3_image_ckpt.items()
+            if not k.endswith(rope_suffixes)
+        }
     if model.inst_interactive_predictor is not None:
         sam3_image_ckpt.update(
             {
@@ -580,6 +595,7 @@ def build_sam3_image_model(
     eval_mode=True,
     checkpoint_path=None,
     load_from_HF=True,
+    image_size=1008,
     enable_segmentation=True,
     enable_inst_interactivity=False,
     compile=False,
@@ -592,6 +608,8 @@ def build_sam3_image_model(
         device: Device to load the model on ('cuda' or 'cpu')
         eval_mode: Whether to set the model to evaluation mode
         checkpoint_path: Optional path to model checkpoint
+        image_size: Input image resolution (must be a multiple of 336,
+            e.g. 672 for low-VRAM GPUs; default 1008)
         enable_segmentation: Whether to enable segmentation head
         enable_inst_interactivity: Whether to enable instance interactivity (SAM 1 task)
         compile_mode: To enable compilation, set to "default"
@@ -607,7 +625,9 @@ def build_sam3_image_model(
     # Create visual components
     compile_mode = "default" if compile else None
     vision_encoder = _create_vision_backbone(
-        compile_mode=compile_mode, enable_inst_interactivity=enable_inst_interactivity
+        compile_mode=compile_mode,
+        enable_inst_interactivity=enable_inst_interactivity,
+        img_size=image_size,
     )
 
     # Create text components
@@ -650,7 +670,9 @@ def build_sam3_image_model(
         checkpoint_path = download_ckpt_from_hf(version="sam3")
     # Load checkpoint if provided
     if checkpoint_path is not None:
-        _load_checkpoint(model, checkpoint_path)
+        _load_checkpoint(
+            model, checkpoint_path, drop_rope_buffers=image_size != 1008
+        )
 
     # Setup device and mode
     model = _setup_device_and_mode(model, device, eval_mode)
