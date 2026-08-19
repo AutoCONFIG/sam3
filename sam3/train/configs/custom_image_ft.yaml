@@ -1,0 +1,390 @@
+# @package _global_
+# ============================================================================
+# SAM 3 自定义数据集图片微调配置 (COCO 格式, 检测/分割)
+# ============================================================================
+# 本配置位于 sam3 子模块内 (Hydra initialize_config_module 要求配置必须在
+# sam3.train 包内), 由前端训练配置的 model.config 指向, 如:
+#   model:
+#     config: sam3/sam3/train/configs/custom_image_ft.yaml
+# 常用项 (数据路径/预训练权重/batch/分辨率/GPU/输出目录) 都在前端 YAML 里配,
+# 启动时由前端翻译为 Hydra override 注入, 不用改本文件;
+# 需要改 transforms/loss/优化器等高级项时才编辑这里 (改动属于 sam3 fork 仓库)。
+#
+# 数据集布局 (Roboflow COCO 导出格式):
+#   <dataset_root>/
+#     train/  ← 图片 + _annotations.coco.json
+#     valid/  ← 图片 + _annotations.coco.json  (只有 test/ 就把 datasets YAML 的 val 改成 test)
+# COCO categories[].name 即文本 prompt (开放词表检测的训练信号)。
+# ============================================================================
+defaults:
+  - _self_
+
+# ============================================================================
+# 路径 (前端自动注入, 见 configs/train/README.md; 直接跑后端则需手动改)
+# ============================================================================
+paths:
+  dataset_root: "<YOUR_DATASET_ROOT>"        # ← 前端 datasets YAML 的 path
+  experiment_log_dir: runs/train/custom_ft   # ← 前端 output.path (相对项目根)
+  bpe_path: sam3/assets/bpe_simple_vocab_16e6.txt.gz  # ← 前端自动注入绝对路径
+
+# ============================================================================
+# 数据集配置
+# ============================================================================
+custom_data:
+  num_images: null  # 限制训练图片数 (debug 用); null = 全部 ← 前端 datasets YAML 的 num_images
+
+  # 训练 transforms
+  train_transforms:
+    - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
+      transforms:
+        - _target_: sam3.train.transforms.filter_query_transforms.FlexibleFilterFindGetQueries
+          query_filter:
+            _target_: sam3.train.transforms.filter_query_transforms.FilterCrowds
+        - _target_: sam3.train.transforms.point_sampling.RandomizeInputBbox
+          box_noise_std: 0.1
+          box_noise_max: 20
+        - _target_: sam3.train.transforms.segmentation.DecodeRle
+        - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
+          sizes:
+            _target_: sam3.train.transforms.basic.get_random_resize_scales
+            size: ${scratch.resolution}
+            min_size: 480
+            rounded: false
+          max_size:
+            _target_: sam3.train.transforms.basic.get_random_resize_max_size
+            size: ${scratch.resolution}
+          square: true
+          consistent_transform: ${scratch.consistent_transform}
+        - _target_: sam3.train.transforms.basic_for_api.PadToSizeAPI
+          size: ${scratch.resolution}
+          consistent_transform: ${scratch.consistent_transform}
+        - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
+        - _target_: sam3.train.transforms.filter_query_transforms.FlexibleFilterFindGetQueries
+          query_filter:
+            _target_: sam3.train.transforms.filter_query_transforms.FilterEmptyTargets
+        - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
+          mean: ${scratch.train_norm_mean}
+          std: ${scratch.train_norm_std}
+        - _target_: sam3.train.transforms.filter_query_transforms.FlexibleFilterFindGetQueries
+          query_filter:
+            _target_: sam3.train.transforms.filter_query_transforms.FilterEmptyTargets
+    - _target_: sam3.train.transforms.filter_query_transforms.FlexibleFilterFindGetQueries
+      query_filter:
+        _target_: sam3.train.transforms.filter_query_transforms.FilterFindQueriesWithTooManyOut
+        max_num_objects: ${scratch.max_ann_per_img}
+
+  # 验证 transforms
+  val_transforms:
+    - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
+      transforms:
+        - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
+          sizes: ${scratch.resolution}
+          max_size:
+            _target_: sam3.train.transforms.basic.get_random_resize_max_size
+            size: ${scratch.resolution}
+          square: true
+          consistent_transform: False
+        - _target_: sam3.train.transforms.basic_for_api.ToTensorAPI
+        - _target_: sam3.train.transforms.basic_for_api.NormalizeAPI
+          mean: ${scratch.train_norm_mean}
+          std: ${scratch.train_norm_std}
+
+  # 检测 loss (无 mask loss)
+  loss:
+    _target_: sam3.train.loss.sam3_loss.Sam3LossWrapper
+    matcher: ${scratch.matcher}
+    o2m_weight: 2.0
+    o2m_matcher:
+      _target_: sam3.train.matcher.BinaryOneToManyMatcher
+      alpha: 0.3
+      threshold: 0.4
+      topk: 4
+    use_o2m_matcher_on_o2m_aux: false
+    loss_fns_find:
+      - _target_: sam3.train.loss.loss_fns.Boxes
+        weight_dict:
+          loss_bbox: 5.0
+          loss_giou: 2.0
+      - _target_: sam3.train.loss.loss_fns.IABCEMdetr
+        weak_loss: False
+        weight_dict:
+          loss_ce: 20.0
+          presence_loss: 20.0
+        pos_weight: 10.0
+        alpha: 0.25
+        gamma: 2
+        use_presence: True
+        pos_focal: false
+        pad_n_queries: 200
+        pad_scale_pos: 1.0
+    loss_fn_semantic_seg: null
+    scale_by_find_batch_size: ${scratch.scale_by_find_batch_size}
+
+  # ────────────────────────────────────────────────────────────────────────
+  # 分割训练 (mask loss): 启用需 4 处联动
+  #   1. scratch.enable_segmentation: true
+  #   2. 上面 loss 的 loss_fns_find 里追加 Masks loss, 并设置 loss_fn_semantic_seg
+  #      (参考 sam3/sam3/train/configs/roboflow_v100/roboflow_v100_full_ft_100_images.yaml
+  #       中的注释块)
+  #   3. scratch.collate_fn / collate_fn_val 的 with_seg_masks: true
+  #   4. COCO json 里需有 segmentation (polygon 或 RLE)
+  # ────────────────────────────────────────────────────────────────────────
+
+# ============================================================================
+# 辅助参数
+# ============================================================================
+scratch:
+  enable_segmentation: False  # 分割训练时设为 true (见 custom_data 末尾说明)
+  d_model: 256
+  pos_embed:
+    _target_: sam3.model.position_encoding.PositionEmbeddingSine
+    num_pos_feats: ${scratch.d_model}
+    normalize: true
+    scale: null
+    temperature: 10000
+
+  use_presence_eval: True
+  original_box_postprocessor:
+    _target_: sam3.eval.postprocessors.PostProcessImage
+    max_dets_per_img: -1
+    use_original_ids: true
+    use_original_sizes_box: true
+    use_presence: ${scratch.use_presence_eval}
+
+  matcher:
+    _target_: sam3.train.matcher.BinaryHungarianMatcherV2
+    focal: true
+    cost_class: 2.0
+    cost_bbox: 5.0
+    cost_giou: 2.0
+    alpha: 0.25
+    gamma: 2
+    stable: False
+  scale_by_find_batch_size: True
+
+  resolution: 1008  # 训练分辨率, 336 的倍数 ← 前端 model.resolution 同步改
+  consistent_transform: False
+  max_ann_per_img: 200
+
+  train_norm_mean: [0.5, 0.5, 0.5]
+  train_norm_std: [0.5, 0.5, 0.5]
+  val_norm_mean: [0.5, 0.5, 0.5]
+  val_norm_std: [0.5, 0.5, 0.5]
+
+  num_train_workers: 10   # Windows 上建议用 overrides 改为 0
+  num_val_workers: 0
+  max_data_epochs: 20
+  target_epoch_size: 1500
+  hybrid_repeats: 1
+  context_length: 2
+  gather_pred_via_filesys: false
+
+  # 学习率: 各组 lr = base × lr_scale ← overrides 改 scratch.lr_scale
+  lr_scale: 0.1
+  lr_transformer: ${times:8e-4,${scratch.lr_scale}}
+  lr_vision_backbone: ${times:2.5e-4,${scratch.lr_scale}}
+  lr_language_backbone: ${times:5e-5,${scratch.lr_scale}}
+  lrd_vision_backbone: 0.9
+  wd: 0.1
+  scheduler_timescale: 20
+  scheduler_warmup: 20
+  scheduler_cooldown: 20
+
+  val_batch_size: 1
+  collate_fn_val:
+    _target_: sam3.train.data.collator.collate_fn_api
+    _partial_: true
+    repeats: ${scratch.hybrid_repeats}
+    dict_key: custom
+    with_seg_masks: ${scratch.enable_segmentation}
+
+  gradient_accumulation_steps: 1
+  train_batch_size: 1   # 每卡 batch ← 前端 train.batch
+  collate_fn:
+    _target_: sam3.train.data.collator.collate_fn_api
+    _partial_: true
+    repeats: ${scratch.hybrid_repeats}
+    dict_key: all
+    with_seg_masks: ${scratch.enable_segmentation}
+
+# ============================================================================
+# Trainer
+# ============================================================================
+trainer:
+  _target_: sam3.train.trainer.Trainer
+  skip_saving_ckpts: false  # 微调必须 false (参考配置默认 true 不存!)
+  empty_gpu_mem_cache_after_eval: True
+  skip_first_val: True
+  max_epochs: 20   # ← 前端 train.epochs
+  accelerator: cuda
+  seed_value: 123
+  val_epoch_freq: 10
+  mode: train   # 改为 val 可做纯评测
+  gradient_accumulation_steps: ${scratch.gradient_accumulation_steps}
+
+  distributed:
+    backend: nccl   # Windows 单机训练需用 overrides 改为 gloo
+    find_unused_parameters: True
+    gradient_as_bucket_view: True
+
+  loss:
+    all: ${custom_data.loss}
+    default:
+      _target_: sam3.train.loss.sam3_loss.DummyLoss
+
+  data:
+    train:
+      _target_: sam3.train.data.torch_dataset.TorchDataset
+      dataset:
+        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
+        limit_ids: ${custom_data.num_images}
+        transforms: ${custom_data.train_transforms}
+        load_segmentation: ${scratch.enable_segmentation}
+        max_ann_per_img: 500000
+        multiplier: 1
+        max_train_queries: 50000
+        max_val_queries: 50000
+        training: true
+        use_caching: False
+        img_folder: ${paths.dataset_root}/train/
+        ann_file: ${paths.dataset_root}/train/_annotations.coco.json
+      shuffle: True
+      batch_size: ${scratch.train_batch_size}
+      num_workers: ${scratch.num_train_workers}
+      pin_memory: True
+      drop_last: True
+      collate_fn: ${scratch.collate_fn}
+
+    val:
+      _target_: sam3.train.data.torch_dataset.TorchDataset
+      dataset:
+        _target_: sam3.train.data.sam3_image_dataset.Sam3ImageDataset
+        load_segmentation: ${scratch.enable_segmentation}
+        coco_json_loader:
+          _target_: sam3.train.data.coco_json_loaders.COCO_FROM_JSON
+          include_negatives: true
+          category_chunk_size: 2  # 显存够可以加大
+          _partial_: true
+        img_folder: ${paths.dataset_root}/valid/
+        ann_file: ${paths.dataset_root}/valid/_annotations.coco.json
+        transforms: ${custom_data.val_transforms}
+        max_ann_per_img: 100000
+        multiplier: 1
+        training: false
+      shuffle: False
+      batch_size: ${scratch.val_batch_size}
+      num_workers: ${scratch.num_val_workers}
+      pin_memory: True
+      drop_last: False
+      collate_fn: ${scratch.collate_fn_val}
+
+  model:
+    _target_: sam3.model_builder.build_sam3_image_model
+    bpe_path: ${paths.bpe_path}
+    device: cpus
+    eval_mode: false
+    enable_segmentation: ${scratch.enable_segmentation}
+    # checkpoint_path / image_size / load_from_HF 由前端 pretrained/resolution 注入 (++ 前缀)
+
+  meters:
+    val:
+      custom:
+        detection:
+          _target_: sam3.eval.coco_writer.PredictionDumper
+          iou_type: "bbox"
+          dump_dir: ${launcher.experiment_log_dir}/dumps
+          merge_predictions: True
+          postprocessor: ${scratch.original_box_postprocessor}
+          gather_pred_via_filesys: ${scratch.gather_pred_via_filesys}
+          maxdets: 100
+          pred_file_evaluators:
+            - _target_: sam3.eval.coco_eval_offline.CocoEvaluatorOfflineWithPredFileEvaluators
+              gt_path: ${paths.dataset_root}/valid/_annotations.coco.json
+              tide: False
+              iou_type: "bbox"
+
+  optim:
+    amp:
+      enabled: True
+      amp_dtype: bfloat16
+    optimizer:
+      _target_: torch.optim.AdamW
+    gradient_clip:
+      _target_: sam3.train.optim.optimizer.GradientClipper
+      max_norm: 0.1
+      norm_type: 2
+    param_group_modifiers:
+      - _target_: sam3.train.optim.optimizer.layer_decay_param_modifier
+        _partial_: True
+        layer_decay_value: ${scratch.lrd_vision_backbone}
+        apply_to: 'backbone.vision_backbone.trunk'
+        overrides:
+          - pattern: '*pos_embed*'
+            value: 1.0
+    options:
+      lr:
+        - scheduler:
+            _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
+            base_lr: ${scratch.lr_transformer}
+            timescale: ${scratch.scheduler_timescale}
+            warmup_steps: ${scratch.scheduler_warmup}
+            cooldown_steps: ${scratch.scheduler_cooldown}
+        - scheduler:
+            _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
+            base_lr: ${scratch.lr_vision_backbone}
+            timescale: ${scratch.scheduler_timescale}
+            warmup_steps: ${scratch.scheduler_warmup}
+            cooldown_steps: ${scratch.scheduler_cooldown}
+          param_names:
+            - 'backbone.vision_backbone.*'
+        - scheduler:
+            _target_: sam3.train.optim.schedulers.InverseSquareRootParamScheduler
+            base_lr: ${scratch.lr_language_backbone}
+            timescale: ${scratch.scheduler_timescale}
+            warmup_steps: ${scratch.scheduler_warmup}
+            cooldown_steps: ${scratch.scheduler_cooldown}
+          param_names:
+            - 'backbone.language_backbone.*'
+      weight_decay:
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+            value: ${scratch.wd}
+        - scheduler:
+            _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+            value: 0.0
+          param_names:
+            - '*bias*'
+          module_cls_names: ['torch.nn.LayerNorm']
+
+  checkpoint:
+    save_dir: ${launcher.experiment_log_dir}/checkpoints
+    save_freq: 0  # 0 = 只保存最后一个 checkpoint.pt
+
+  logging:
+    tensorboard_writer:
+      _target_: sam3.train.utils.logger.make_tensorboard_logger
+      log_dir: ${launcher.experiment_log_dir}/tensorboard
+      flush_secs: 120
+      should_log: True
+    wandb_writer: null
+    log_dir: ${launcher.experiment_log_dir}/logs
+    log_freq: 10
+
+# ============================================================================
+# Launcher / Submitit (本地训练)
+# ============================================================================
+launcher:
+  num_nodes: 1
+  gpus_per_node: 1   # ← 前端 --num-gpus / train.num_gpus 覆盖
+  experiment_log_dir: ${paths.experiment_log_dir}
+  multiprocessing_context: forkserver
+
+submitit:
+  account: null
+  partition: null
+  qos: null
+  timeout_hour: 72
+  use_cluster: False   # 本地训练 (参考配置默认 True, 前端 use_cluster: 0 也会覆盖)
+  cpus_per_task: 10
+  port_range: [10000, 65000]
+  constraint: null

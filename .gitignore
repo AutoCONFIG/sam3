@@ -151,6 +151,3 @@ Thumbs.db
 # BPE vocabulary files
 *.bpe
 *.vocab
-
-# Synced from the outer sam-project frontend at train launch (user custom configs)
-sam3/train/configs/_custom/
