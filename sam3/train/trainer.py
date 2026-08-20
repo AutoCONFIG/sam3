@@ -172,6 +172,8 @@ class Trainer:
         skip_saving_ckpts: bool = False,
         empty_gpu_mem_cache_after_eval: bool = True,
         gradient_accumulation_steps: int = 1,
+        freeze: Optional[List[str]] = None,
+        early_stop: Optional[Dict[str, Any]] = None,
     ):
         self._setup_env_variables(env_variables)
         self._setup_timers()
@@ -200,6 +202,16 @@ class Trainer:
         self.skip_saving_ckpts = skip_saving_ckpts
         self.empty_gpu_mem_cache_after_eval = empty_gpu_mem_cache_after_eval
 
+        # freeze: unix pattern 列表, 匹配的参数 requires_grad=False (真冻结:
+        # 不算梯度/不进优化器/DDP 不同步, 比把该组 lr 设为 0 省算力省显存)
+        self.freeze_patterns = list(freeze) if freeze else []
+        # early_stop: {"enabled": bool, "patience": int, "metric": str,
+        #              "mode": "max"|"min", "min_delta": float}
+        self.early_stop_conf = dict(early_stop) if early_stop else None
+        self._early_stop_best = None
+        self._early_stop_bad_count = 0
+        self._early_stop_warned = False
+
         self._infer_distributed_backend_if_none(distributed, accelerator)
 
         self._setup_device(accelerator)
@@ -224,6 +236,7 @@ class Trainer:
 
         self._setup_components()  # Except Optimizer everything is setup here.
         self._move_to_device()
+        self._apply_freeze()  # 必须在 _construct_optimizers 之前
         self._construct_optimizers()
         self._setup_dataloaders()
 
@@ -613,12 +626,14 @@ class Trainer:
 
             # Run val, not running on last epoch since will run after the
             # loop anyway
+            stop_early = False
             if self.is_intermediate_val_epoch(self.epoch):
-                self.run_val()
+                val_outs = self.run_val()
                 if torch.cuda.is_available() and self.empty_gpu_mem_cache_after_eval:
                     # release memory buffers held by the model during eval (which typically
                     # involves a lot more frames in video grounding that during training)
                     torch.cuda.empty_cache()
+                stop_early = self._check_early_stop(val_outs)
 
             if self.distributed_rank == 0:
                 self.best_meter_values.update(self._get_trainer_state("train"))
@@ -629,12 +644,18 @@ class Trainer:
                     f.write(json.dumps(self.best_meter_values) + "\n")
 
             self.epoch += 1
+            if stop_early:
+                logging.info(
+                    f"Early stopping at epoch {self.epoch} "
+                    f"(patience={self.early_stop_conf.get('patience', 5)} reached)"
+                )
+                break
         # epoch was incremented in the loop but the val step runs out of the loop
         self.epoch -= 1
 
     def run_val(self):
         if not self.val_dataset:
-            return
+            return None
 
         dataloader = self.val_dataset.get_loader(epoch=int(self.epoch))
         outs = self.val_epoch(dataloader, phase=Phase.VAL)
@@ -648,6 +669,7 @@ class Trainer:
                 "a",
             ) as f:
                 f.write(json.dumps(outs) + "\n")
+        return outs
 
     def val_epoch(self, val_loader, phase):
         batch_time = AverageMeter("Batch Time", self.device, ":.2f")
@@ -1122,12 +1144,113 @@ class Trainer:
         logging.info("Finished setting up components: Model, loss, optim, meters etc.")
 
     def _construct_optimizers(self):
+        param_allowlist = None
+        validate_param_groups = True
+        if self.freeze_patterns:
+            # 冻结参数不进优化器 (不分配 AdamW 状态); 全参数覆盖校验随之跳过
+            param_allowlist = {
+                name for name, p in self.model.named_parameters() if p.requires_grad
+            }
+            validate_param_groups = False
         self.optim = construct_optimizer(
             self.model,
             self.optim_conf.optimizer,
             self.optim_conf.options,
             self.optim_conf.param_group_modifiers,
+            param_allowlist=param_allowlist,
+            validate_param_groups=validate_param_groups,
         )
+
+    def _apply_freeze(self):
+        """按 ``trainer.freeze`` 的 unix pattern 冻结参数 (requires_grad=False)。
+
+        与把某组 lr 设为 0 不同, 真冻结不算梯度、不做 DDP 同步、不分配优化器状态。
+        """
+        if not self.freeze_patterns:
+            return
+        frozen = []
+        trainable = 0
+        for name, param in self.model.named_parameters():
+            if any(fnmatch.fnmatch(name, pat) for pat in self.freeze_patterns):
+                param.requires_grad_(False)
+                frozen.append(name)
+            else:
+                trainable += 1
+        if trainable == 0:
+            raise ValueError(
+                f"freeze patterns {self.freeze_patterns} matched ALL parameters"
+            )
+        logging.info(
+            f"Freezing {len(frozen)} params (patterns: {self.freeze_patterns}), "
+            f"{trainable} params remain trainable"
+        )
+        for name in frozen[:10]:
+            logging.info(f"  frozen: {name}")
+        if len(frozen) > 10:
+            logging.info(f"  ... and {len(frozen) - 10} more")
+
+    def _check_early_stop(self, val_outs):
+        """每次验证后调用; 多卡时由 rank 0 判定并广播, 保证各卡一致。"""
+        if not self.early_stop_conf or not self.early_stop_conf.get("enabled", False):
+            return False
+        if not val_outs:
+            return False
+        decision = False
+        if self.distributed_rank == 0:
+            decision = self._early_stop_decision(val_outs)
+        if is_dist_avail_and_initialized():
+            obj_list = [decision]
+            dist.broadcast_object_list(obj_list, src=0)
+            decision = obj_list[0]
+        return decision
+
+    def _early_stop_decision(self, val_outs):
+        """连续 patience 次验证无改进返回 True (按验证次数计)。
+
+        指标键匹配: 精确 → 后缀 ("/"+metric) → 唯一子串; 找不到时警告一次并
+        永不早停 (宁可不停, 也不因键名写错而误停)。
+        """
+        cfg = self.early_stop_conf
+        metric = str(cfg.get("metric", "coco_eval_bbox_AP")).replace("\\", "/")
+        keys = {k.replace("\\", "/"): v for k, v in val_outs.items()}
+        value = None
+        if metric in keys:
+            value = keys[metric]
+        else:
+            matches = [k for k in keys if k.endswith("/" + metric)]
+            if not matches:
+                matches = [k for k in keys if metric in k]
+            if len(matches) == 1:
+                value = keys[matches[0]]
+        if value is None:
+            if not self._early_stop_warned:
+                self._early_stop_warned = True
+                logging.warning(
+                    f"early_stop: metric '{metric}' 在验证输出里找不到 (或不唯一), "
+                    f"本次训练不会早停。可用键: {sorted(keys)}"
+                )
+            return False
+
+        value = float(value)
+        mode = str(cfg.get("mode", "max"))
+        min_delta = float(cfg.get("min_delta", 0.0))
+        patience = int(cfg.get("patience", 5))
+        if self._early_stop_best is None:
+            improved = True
+        elif mode == "max":
+            improved = value > self._early_stop_best + min_delta
+        else:
+            improved = value < self._early_stop_best - min_delta
+        if improved:
+            self._early_stop_best = value
+            self._early_stop_bad_count = 0
+        else:
+            self._early_stop_bad_count += 1
+        logging.info(
+            f"early_stop: {metric}={value:.4f} best={self._early_stop_best:.4f} "
+            f"no-improve={self._early_stop_bad_count}/{patience}"
+        )
+        return self._early_stop_bad_count >= patience
 
     def _log_loss_detailed_and_return_core_loss(self, loss, loss_str, step):
         core_loss = loss.pop(CORE_LOSS_KEY)
