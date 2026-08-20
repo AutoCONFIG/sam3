@@ -151,3 +151,6 @@ Thumbs.db
 # BPE vocabulary files
 *.bpe
 *.vocab
+
+# Generated from the outer sam-project frontend at train launch (configs/models/*.yaml hydra section)
+sam3/train/configs/_custom/
