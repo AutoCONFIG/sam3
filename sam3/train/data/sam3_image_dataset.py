@@ -159,6 +159,7 @@ class CustomCocoDetectionAPI(VisionDataset):
         coco_json_loader: Callable = COCO_FROM_JSON,
         # pyrefly: ignore [bad-function-definition]
         limit_ids: int = None,
+        limit_ratio: float = 1.0,
     ) -> None:
         super().__init__(root)
 
@@ -174,6 +175,7 @@ class CustomCocoDetectionAPI(VisionDataset):
         self.coco = None
         self.coco_json_loader = coco_json_loader
         self.limit_ids = limit_ids
+        self.limit_ratio = limit_ratio
         self.set_sharded_annotation_file(0)
         self.training = training
         self.blurring_masks_path = blurring_masks_path
@@ -246,6 +248,10 @@ class CustomCocoDetectionAPI(VisionDataset):
         self.coco = self.coco_json_loader(annFile)
         # Use a torch tensor here to optimize memory usage when using several dataloaders
         ids_list = list(sorted(self.coco.getDatapointIds()))
+        if self.limit_ratio is not None and self.limit_ratio < 1.0:
+            local_random = random.Random(len(ids_list))
+            local_random.shuffle(ids_list)
+            ids_list = ids_list[: int(len(ids_list) * self.limit_ratio)]
         if self.limit_ids is not None:
             local_random = random.Random(len(ids_list))
             local_random.shuffle(ids_list)
@@ -460,6 +466,7 @@ class Sam3ImageDataset(CustomCocoDetectionAPI):
         coco_json_loader: Callable = COCO_FROM_JSON,
         # pyrefly: ignore [bad-function-definition]
         limit_ids: int = None,
+        limit_ratio: float = 1.0,
     ):
         super(Sam3ImageDataset, self).__init__(
             img_folder,
@@ -473,6 +480,7 @@ class Sam3ImageDataset(CustomCocoDetectionAPI):
             filter_query=filter_query,
             coco_json_loader=coco_json_loader,
             limit_ids=limit_ids,
+            limit_ratio=limit_ratio,
         )
 
         self._transforms = transforms
@@ -533,3 +541,46 @@ class Sam3ImageDataset(CustomCocoDetectionAPI):
             )
 
         return datapoint
+
+
+class ConcatSam3Datasets(torch.utils.data.ConcatDataset):
+    """拼接多个 Sam3ImageDataset, 并把 set_epoch/set_curr_epoch 转发给子集。
+
+    torch.utils.data.ConcatDataset 本身不实现 set_epoch, 而 TorchDataset.get_loader
+    会调 dataset.set_epoch(epoch) 把 epoch 传给 Sam3ImageDataset (它依赖 epoch 控制缓存
+    等)。直接用原生 ConcatDataset 会让子集收不到 epoch, 故加此薄包装。
+    """
+
+    def __init__(self, datasets: List):
+        super().__init__(datasets)
+
+    def _fan_out(self, method: str, value):
+        for ds in self.datasets:
+            fn = getattr(ds, method, None)
+            if callable(fn):
+                fn(value)
+
+    def set_epoch(self, epoch: int):
+        self._fan_out("set_epoch", epoch)
+
+    def set_curr_epoch(self, epoch: int):
+        self._fan_out("set_curr_epoch", epoch)
+
+    @property
+    def epoch(self):
+        # 取第一个有该属性的子集, 供 TorchDataset.get_loader 的 self.dataset.epoch 读取
+        for ds in self.datasets:
+            if hasattr(ds, "epoch"):
+                return getattr(ds, "epoch")
+        return None
+
+    @epoch.setter
+    def epoch(self, value):
+        self._fan_out("__setattr__", ("epoch", value))
+        # 上面的 fan_out 对 __setattr__ 不适用, 直接设到各子集
+        for ds in self.datasets:
+            if hasattr(ds, "epoch") or hasattr(ds, "set_epoch"):
+                try:
+                    ds.epoch = value
+                except AttributeError:
+                    pass
