@@ -1,14 +1,17 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
 """
-Validation visualization meter (YOLO 风格, 分割任务)。
+Validation visualization meter (YOLO 风格, 分割任务, 异步渲染)。
 
-每次验证时, rank 0 把验证图跨 batch 累积, 每凑满 per_file 张拼一张 4x4 马赛克,
+每次验证时, rank 0 把验证图跨 batch 累积, 每凑满 per_file 张拼一张近方形马赛克,
 写到实验根目录 (与 ultralytics 一致, 文件名固定, 每轮验证覆盖):
   val_batch{f}_labels.jpg  — GT (mask 半透明叠加 + 类别名)
   val_batch{f}_pred.jpg    — 预测 (mask 半透明叠加 + 类别名 + 置信度)
 共 max_files 个文件 (默认 3 × 16 = 48 张图)。训练进行中直接打开最新文件
 即可看当前模型表现。仅供人工查看, 不产生指标; 任何失败仅告警不中断训练。
+
+渲染 (mask 叠加/拼图/JPEG 编码) 在后台 daemon 线程执行, 不阻塞训练;
+上次未渲染完则跳过本次 (参考 yolo-project 的 plot 回调做法)。
 
 作为 trainer.meters 的一员, 与 PredictionDumper 共用同一套 meter 协议:
 update() 每 batch 调用一次, compute_synced() 每轮验证结束时调用, reset() 收尾。
@@ -19,6 +22,7 @@ import hashlib
 import logging
 import math
 import os
+import threading
 from collections import defaultdict
 
 import cv2
@@ -44,30 +48,45 @@ def _cxcywh_norm_to_xyxy(boxes, width, height):
 
 
 def _draw_panel(img, items):
-    """单张图的分割可视化: mask 半透明叠加 + 类别文字 (分割任务不画检测框)。
+    """单张图的分割可视化: mask 半透明叠加 + YOLO 式标签 (色块底白字, 不画检测框)。
 
-    items: [(xyxy 仅用于无 mask 时的文字定位, mask|None, color, label)]
+    items: [(xyxy 仅供无 mask 时定位文字, mask|None, color, label)]
     """
     out = img.copy()
-    for box, mask, color, label in items:
+    for _, mask, color, _ in items:
         if mask is not None and mask.shape == out.shape[:2]:
             m = mask.astype(bool)
             out[m] = (
                 out[m].astype(np.float32) * 0.5 + np.array(color, dtype=np.float32) * 0.5
             ).astype(np.uint8)
+    h = out.shape[0]
+    fs = max(0.6, h / 640.0 * 0.6)          # 字号随图尺寸缩放, 马赛克里也可读
+    thick = max(1, int(round(fs * 1.5)))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    drawn = []  # 已画标签的矩形, 大 mask 的 xs/ys.min 常相同, 需错开避免叠字
     for box, mask, color, label in items:
         if mask is not None and mask.shape == out.shape[:2]:
             ys, xs = np.nonzero(mask)
             if len(xs) == 0:
                 continue
-            tx, ty = int(xs.min()), max(12, int(ys.min()) - 4)
+            tx, ty = int(xs.min()), int(ys.min())
         else:
             # 无 mask (解码失败等兜底): 文字放框左上角, 仍不画框
-            tx, ty = int(box[0]), max(12, int(box[1]) - 4)
-        cv2.putText(
-            out, label, (tx, ty),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA,
-        )
+            tx, ty = int(box[0]), int(box[1])
+        (tw, th), _ = cv2.getTextSize(label, font, fs, thick)
+        ty = max(ty, th + 6)
+        rect = (tx, ty - th - 4, tx + tw + 4, ty + 2)
+        for _ in range(8):
+            if not any(
+                not (rect[2] < r[0] or rect[0] > r[2] or rect[3] < r[1] or rect[1] > r[3])
+                for r in drawn
+            ):
+                break
+            ty += th + 8
+            rect = (tx, ty - th - 4, tx + tw + 4, ty + 2)
+        drawn.append(rect)
+        cv2.rectangle(out, (rect[0], rect[1]), (rect[2], rect[3]), color, -1)
+        cv2.putText(out, label, (tx + 2, ty - 2), font, fs, (255, 255, 255), thick, cv2.LINE_AA)
     return out
 
 
@@ -83,30 +102,44 @@ def _mosaic(panels, cell_h, cell_w):
     return grid
 
 
+def _render_mosaic_pair(gt_raw, pred_raw, path_prefix):
+    """后台线程任务: 画图 + 拼图 + 写盘。raw = [(img_uint8, items), ...]"""
+    gt_panels = [_draw_panel(img, items) for img, items in gt_raw]
+    pred_panels = [_draw_panel(img, items) for img, items in pred_raw]
+    h, w = gt_panels[0].shape[:2]
+    cv2.imwrite(path_prefix + "_labels.jpg", _mosaic(gt_panels, h, w))
+    cv2.imwrite(path_prefix + "_pred.jpg", _mosaic(pred_panels, h, w))
+
+
 class ValPredictionVisualizer:
     def __init__(
         self,
         out_dir: str,
-        postprocessor,
         max_files: int = 3,
         per_file: int = 16,
-        score_threshold: float = 0.3,
+        score_threshold: float = 0.1,
+        min_per_img: int = 3,
+        max_per_img: int = 20,
+        use_presence: bool = True,
         norm_mean=(0.5, 0.5, 0.5),
         norm_std=(0.5, 0.5, 0.5),
     ):
         self.out_dir = out_dir
-        self.postprocessor = postprocessor
         self.max_files = max_files
         self.per_file = per_file
         self.score_threshold = score_threshold
+        self.min_per_img = min_per_img
+        self.max_per_img = max_per_img
+        self.use_presence = use_presence
         self.norm_mean = torch.tensor(norm_mean).view(3, 1, 1)
         self.norm_std = torch.tensor(norm_std).view(3, 1, 1)
+        self._thread = None
         self._reset_buffer()
 
     def _reset_buffer(self):
         self._file_idx = 0
-        self._gt_panels = []
-        self._pred_panels = []
+        self._gt_raw = []    # [(img_uint8, gt_items)]
+        self._pred_raw = []  # [(img_uint8, pred_items)]
 
     @torch.no_grad()
     def update(self, find_stages, find_metadatas, model, batch, key):
@@ -167,55 +200,88 @@ class ValPredictionVisualizer:
                         mask = seg[r, j].cpu().numpy()
                     gt[row_img[r]].append((boxes[j].tolist(), mask, color, text))
 
-            # ── Pred: postprocessor 直接出画布尺度 box/mask ──
-            results = self.postprocessor(
-                outputs, sizes, sizes, consistent=True
-            )  # list of R dicts: scores/labels/boxes[/masks]
+            # ── Pred: 得分公式与后端 PostProcessImage(use_presence) 一致 ──
+            # (logits.sigmoid() × presence.sigmoid()); mask 只对筛出的高分 query
+            # 插值 —— 若像后处理器那样对全部 200 个 query 的 mask 上采样到画布,
+            # 1008 分辨率下一次要 ~10GB 显存, 会 OOM
+            out_probs = outputs["pred_logits"].sigmoid()  # [R, Q, 1]
+            if self.use_presence and "presence_logit_dec" in outputs:
+                presence = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)
+                out_probs = out_probs * presence
+            pred_masks = outputs["pred_masks"] if "pred_masks" in outputs else None
             for r in range(R):
                 text = row_text[r]
                 color = _text_color(text)
-                res = results[r]
-                keep = res["scores"] > self.score_threshold
-                for k in keep.nonzero(as_tuple=True)[0].tolist():
-                    mask = res["masks"][k].cpu().numpy() if "masks" in res else None
-                    box = res["boxes"][k].cpu().tolist()
-                    score = res["scores"][k].item()
-                    pred[row_img[r]].append((box, mask, color, f"{text} {score:.2f}"))
+                scores = out_probs[r, :, 0]
+                keep = (scores > self.score_threshold).nonzero(as_tuple=True)[0]
+                # 零样本/训练初期分数普遍很低, 至少保留 top min_per_img 让面板不空
+                topk = torch.argsort(scores, descending=True)[: self.min_per_img]
+                keep = torch.unique(torch.cat([keep, topk]))
+                keep = keep[torch.argsort(scores[keep], descending=True)]
+                keep = keep[: self.max_per_img]
+                boxes = _cxcywh_norm_to_xyxy(
+                    outputs["pred_boxes"][r, keep].float().cpu(), W, H
+                ).tolist()
+                masks = None
+                if pred_masks is not None:
+                    m = pred_masks[r, keep].float()
+                    if m.dim() == 3:  # [K, h, w] → [K, 1, h, w]
+                        m = m.unsqueeze(1)
+                    masks = (
+                        torch.nn.functional.interpolate(
+                            m, (H, W), mode="bilinear", align_corners=False,
+                        ).sigmoid() > 0.5
+                    ).squeeze(1).cpu().numpy()
+                for j, k in enumerate(keep.cpu().tolist()):
+                    mask = masks[j] if masks is not None else None
+                    score = scores[k].item()
+                    pred[row_img[r]].append(
+                        (boxes[j], mask, color, f"{text} {score:.2f}")
+                    )
 
-        # ── 攒图: 每凑满 per_file 张落盘一张马赛克 ──
+        # ── 攒图 (仅取数/反归一化, 轻量); 凑满 per_file 张就丢给后台线程渲染 ──
         for i in range(B):
             if self._file_idx >= self.max_files:
                 break
             canvas = (imgs[i].float().cpu() * self.norm_std + self.norm_mean)
             canvas = (canvas.clamp(0, 1).permute(1, 2, 0).numpy() * 255).astype(np.uint8)
             canvas = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
-            self._gt_panels.append(_draw_panel(canvas, gt.get(i, [])))
-            self._pred_panels.append(_draw_panel(canvas, pred.get(i, [])))
-            if len(self._gt_panels) >= self.per_file:
-                self._flush()
+            self._gt_raw.append((canvas, gt.get(i, [])))
+            self._pred_raw.append((canvas, pred.get(i, [])))
+            if len(self._gt_raw) >= self.per_file:
+                self._submit()
 
-    def _flush(self):
-        """把缓冲的图写成一对 labels/pred 马赛克并清空缓冲。"""
-        if not self._gt_panels:
+    def _submit(self):
+        """把缓冲的图丢给后台线程渲染; 上次没渲染完则跳过 (宁可丢图不阻塞训练)。"""
+        if not self._gt_raw:
             return
-        os.makedirs(self.out_dir, exist_ok=True)
-        h, w = self._gt_panels[0].shape[:2]
-        f = self._file_idx
-        cv2.imwrite(
-            os.path.join(self.out_dir, f"val_batch{f}_labels.jpg"),
-            _mosaic(self._gt_panels, h, w),
-        )
-        cv2.imwrite(
-            os.path.join(self.out_dir, f"val_batch{f}_pred.jpg"),
-            _mosaic(self._pred_panels, h, w),
-        )
-        logging.info(
-            f"ValPredictionVisualizer: wrote val_batch{f}_labels/pred.jpg "
-            f"({len(self._gt_panels)} images) to {self.out_dir}"
-        )
+        if self._thread is not None and self._thread.is_alive():
+            logging.warning(
+                "ValPredictionVisualizer: previous mosaic still rendering, "
+                f"dropping {len(self._gt_raw)} image(s)"
+            )
+            self._gt_raw = []
+            self._pred_raw = []
+            return
+        gt_raw, pred_raw = self._gt_raw, self._pred_raw
+        prefix = os.path.join(self.out_dir, f"val_batch{self._file_idx}")
+        n = len(gt_raw)
         self._file_idx += 1
-        self._gt_panels = []
-        self._pred_panels = []
+        self._gt_raw = []
+        self._pred_raw = []
+
+        def _job():
+            try:
+                os.makedirs(self.out_dir, exist_ok=True)
+                _render_mosaic_pair(gt_raw, pred_raw, prefix)
+                logging.info(
+                    f"ValPredictionVisualizer: wrote {prefix}_labels/pred.jpg ({n} images)"
+                )
+            except Exception:
+                logging.exception("ValPredictionVisualizer: async render failed")
+
+        self._thread = threading.Thread(target=_job, daemon=True)
+        self._thread.start()
 
     def synchronize_between_processes(self):
         pass  # 只在 rank 0 本地出图, 无需同步
@@ -223,7 +289,7 @@ class ValPredictionVisualizer:
     def compute_synced(self):
         if is_main_process() and self._file_idx < self.max_files:
             try:
-                self._flush()  # 验证收尾: 落盘不足 per_file 的零头
+                self._submit()  # 验证收尾: 提交不足 per_file 的零头
             except Exception:
                 logging.exception("ValPredictionVisualizer: flush failed, skipping")
         return {}
