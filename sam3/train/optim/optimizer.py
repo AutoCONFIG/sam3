@@ -168,19 +168,29 @@ def map_scheduler_cfgs_to_param_groups(
     return schedulers, param_groups
 
 
-def validate_param_group_params(param_groups: List[Dict], model: nn.Module):
+def validate_param_group_params(
+    param_groups: List[Dict],
+    model: nn.Module,
+    param_allowlist: Optional[Set[str]] = None,
+):
     """Check that the param groups are non-overlapping and cover all the parameters.
 
     Args:
         param_groups: List of all param groups
         model: Model to validate against. The check ensures that all the model
             parameters are part of param_groups
+        param_allowlist: 只校验这些参数 (trainer.freeze 冻结的参数不进优化器,
+            不在校验范围内); None = 校验模型全部参数
     """
     for pg in param_groups:
         # no param should be repeated within a group
         assert len(pg["params"]) == len(set(pg["params"]))
     parameters = [set(param_group["params"]) for param_group in param_groups]
-    model_parameters = {parameter for _, parameter in model.named_parameters()}
+    model_parameters = {
+        parameter
+        for name, parameter in model.named_parameters()
+        if param_allowlist is None or name in param_allowlist
+    }
     for p1, p2 in itertools.permutations(parameters, 2):
         assert p1.isdisjoint(p2), "Scheduler generated param_groups should be disjoint"
     assert set.union(*parameters) == model_parameters, (
@@ -358,13 +368,34 @@ def construct_optimizer(
     scheduler_cfgs_per_option = hydra.utils.instantiate(options_conf)
     all_scheduler_cfgs = []
     for option, scheduler_cfgs in scheduler_cfgs_per_option.items():
+        kept_scheduler_cfgs = []
         for config in scheduler_cfgs:
             config.option = option
+            patterns = list(config.get("param_names") or [])
+            if patterns:
+                # trainer.freeze 真冻结后, param_allowlist 里可能已无匹配参数:
+                # 剔除未命中的 pattern (warning 留痕); 整组落空则跳过该组,
+                # 否则 unix_param_pattern_to_parameter_names 的"每组≥1参数"断言会炸
+                hit = [p for p in patterns if fnmatch.filter(all_parameter_names, p)]
+                missed = sorted(set(patterns) - set(hit))
+                if missed:
+                    logging.warning(
+                        f"优化器选项 [{option}] 的 param_names pattern {missed} "
+                        f"未匹配到任何可优化参数 (已被 trainer.freeze 冻结?), 已跳过"
+                    )
+                if not hit and not config.get("module_cls_names"):
+                    logging.warning(
+                        f"优化器选项 [{option}] 的调度器组 (patterns={patterns}) "
+                        f"整组无匹配参数, 跳过该组"
+                    )
+                    continue
+                config.param_names = hit or None
             config.parameter_names = _unix_pattern_to_parameter_names(
                 config, all_parameter_names, module_cls_to_all_param_names
             )
-        set_default_parameters(scheduler_cfgs, all_parameter_names)
-        all_scheduler_cfgs.append(scheduler_cfgs)
+            kept_scheduler_cfgs.append(config)
+        set_default_parameters(kept_scheduler_cfgs, all_parameter_names)
+        all_scheduler_cfgs.append(kept_scheduler_cfgs)
 
     if param_group_modifiers_conf:
         for custom_param_modifier in param_group_modifiers_conf:
@@ -379,7 +410,7 @@ def construct_optimizer(
         named_parameters,
     )
     if validate_param_groups:
-        validate_param_group_params(param_groups, model)
+        validate_param_group_params(param_groups, model, param_allowlist)
     optimizer = hydra.utils.instantiate(optimizer_conf, param_groups)
     return Optimizer(optimizer, schedulers)
 
