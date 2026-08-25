@@ -199,6 +199,7 @@ class TextTransformer(nn.Module):
 
         self.token_embedding = nn.Embedding(self.vocab_size, width)
         self.positional_embedding = nn.Parameter(torch.empty(self.num_pos, width))
+        nn.init.trunc_normal_(self.positional_embedding, std=0.02)
         self.transformer = Transformer(
             width=width,
             layers=layers,
@@ -222,6 +223,7 @@ class TextTransformer(nn.Module):
         else:
             # pyrefly: ignore [bad-assignment]
             self.text_projection = nn.Parameter(torch.empty(width, output_dim))
+            nn.init.normal_(self.text_projection, std=width**-0.5)
 
     def build_causal_mask(self) -> torch.Tensor:
         # lazily create causal attention mask, with full attention between the tokens
