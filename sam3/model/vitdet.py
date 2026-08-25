@@ -68,7 +68,13 @@ class Mlp(nn.Module):
         self.drop2 = nn.Dropout(drop_probs[1])
 
     def forward(self, x):
-        x = addmm_act(type(self.act), self.fc1, x)
+        if torch.is_grad_enabled():
+            # 训练: 标准可导路径 (addmm_act 是推理专用融合核: detach 权重 + bf16,
+            # 无 autograd, grad 开启时直接报错)
+            x = self.fc1(x)
+            x = self.act(x)
+        else:
+            x = addmm_act(type(self.act), self.fc1, x)
         x = self.drop1(x)
         x = self.norm(x)
         x = self.fc2(x)
