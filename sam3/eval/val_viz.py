@@ -1,13 +1,14 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
 """
-Validation visualization meter (YOLO 风格)。
+Validation visualization meter (YOLO 风格, 分割任务)。
 
-每次验证时, 把 rank 0 前 max_batches 个 batch 画成两张马赛克图, 写到实验根目录:
-  val_batch{b}_labels.jpg  — GT (框 + mask + 类别名)
-  val_batch{b}_pred.jpg    — 预测 (框 + mask + 类别名 + 置信度)
-文件名固定, 每轮验证覆盖, 与 ultralytics 的查看习惯一致; 训练进行中可直接
-打开最新文件看当前模型表现。仅供人工查看, 不产生指标; 任何失败仅告警。
+每次验证时, rank 0 把验证图跨 batch 累积, 每凑满 per_file 张拼一张 4x4 马赛克,
+写到实验根目录 (与 ultralytics 一致, 文件名固定, 每轮验证覆盖):
+  val_batch{f}_labels.jpg  — GT (mask 半透明叠加 + 类别名)
+  val_batch{f}_pred.jpg    — 预测 (mask 半透明叠加 + 类别名 + 置信度)
+共 max_files 个文件 (默认 3 × 16 = 48 张图)。训练进行中直接打开最新文件
+即可看当前模型表现。仅供人工查看, 不产生指标; 任何失败仅告警不中断训练。
 
 作为 trainer.meters 的一员, 与 PredictionDumper 共用同一套 meter 协议:
 update() 每 batch 调用一次, compute_synced() 每轮验证结束时调用, reset() 收尾。
@@ -43,19 +44,28 @@ def _cxcywh_norm_to_xyxy(boxes, width, height):
 
 
 def _draw_panel(img, items):
-    """在单张图上叠加 mask/box/标签。items: [(xyxy, mask|None, color, label)]"""
+    """单张图的分割可视化: mask 半透明叠加 + 类别文字 (分割任务不画检测框)。
+
+    items: [(xyxy 仅用于无 mask 时的文字定位, mask|None, color, label)]
+    """
     out = img.copy()
-    for _, mask, color, _ in items:
+    for box, mask, color, label in items:
         if mask is not None and mask.shape == out.shape[:2]:
             m = mask.astype(bool)
             out[m] = (
                 out[m].astype(np.float32) * 0.5 + np.array(color, dtype=np.float32) * 0.5
             ).astype(np.uint8)
-    for box, _, color, label in items:
-        x1, y1, x2, y2 = [int(v) for v in box]
-        cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+    for box, mask, color, label in items:
+        if mask is not None and mask.shape == out.shape[:2]:
+            ys, xs = np.nonzero(mask)
+            if len(xs) == 0:
+                continue
+            tx, ty = int(xs.min()), max(12, int(ys.min()) - 4)
+        else:
+            # 无 mask (解码失败等兜底): 文字放框左上角, 仍不画框
+            tx, ty = int(box[0]), max(12, int(box[1]) - 4)
         cv2.putText(
-            out, label, (x1, max(12, y1 - 4)),
+            out, label, (tx, ty),
             cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA,
         )
     return out
@@ -78,26 +88,32 @@ class ValPredictionVisualizer:
         self,
         out_dir: str,
         postprocessor,
-        max_batches: int = 3,
+        max_files: int = 3,
+        per_file: int = 16,
         score_threshold: float = 0.3,
         norm_mean=(0.5, 0.5, 0.5),
         norm_std=(0.5, 0.5, 0.5),
     ):
         self.out_dir = out_dir
         self.postprocessor = postprocessor
-        self.max_batches = max_batches
+        self.max_files = max_files
+        self.per_file = per_file
         self.score_threshold = score_threshold
         self.norm_mean = torch.tensor(norm_mean).view(3, 1, 1)
         self.norm_std = torch.tensor(norm_std).view(3, 1, 1)
-        self._batch_idx = 0
+        self._reset_buffer()
+
+    def _reset_buffer(self):
+        self._file_idx = 0
+        self._gt_panels = []
+        self._pred_panels = []
 
     @torch.no_grad()
     def update(self, find_stages, find_metadatas, model, batch, key):
-        if not is_main_process() or self._batch_idx >= self.max_batches:
+        if not is_main_process() or self._file_idx >= self.max_files:
             return
         try:
             self._update(find_stages, find_metadatas, batch)
-            self._batch_idx += 1
         except Exception:
             # 可视化是附属功能, 任何失败都不应影响训练
             logging.exception("ValPredictionVisualizer: render failed, skipping")
@@ -166,37 +182,54 @@ class ValPredictionVisualizer:
                     score = res["scores"][k].item()
                     pred[row_img[r]].append((box, mask, color, f"{text} {score:.2f}"))
 
-        # ── YOLO 风格: labels / pred 两张马赛克, 文件名固定每轮覆盖 ──
-        os.makedirs(self.out_dir, exist_ok=True)
-        gt_panels, pred_panels = [], []
+        # ── 攒图: 每凑满 per_file 张落盘一张马赛克 ──
         for i in range(B):
+            if self._file_idx >= self.max_files:
+                break
             canvas = (imgs[i].float().cpu() * self.norm_std + self.norm_mean)
             canvas = (canvas.clamp(0, 1).permute(1, 2, 0).numpy() * 255).astype(np.uint8)
             canvas = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
-            gt_panels.append(_draw_panel(canvas, gt.get(i, [])))
-            pred_panels.append(_draw_panel(canvas, pred.get(i, [])))
+            self._gt_panels.append(_draw_panel(canvas, gt.get(i, [])))
+            self._pred_panels.append(_draw_panel(canvas, pred.get(i, [])))
+            if len(self._gt_panels) >= self.per_file:
+                self._flush()
 
-        b = self._batch_idx
+    def _flush(self):
+        """把缓冲的图写成一对 labels/pred 马赛克并清空缓冲。"""
+        if not self._gt_panels:
+            return
+        os.makedirs(self.out_dir, exist_ok=True)
+        h, w = self._gt_panels[0].shape[:2]
+        f = self._file_idx
         cv2.imwrite(
-            os.path.join(self.out_dir, f"val_batch{b}_labels.jpg"),
-            _mosaic(gt_panels, H, W),
+            os.path.join(self.out_dir, f"val_batch{f}_labels.jpg"),
+            _mosaic(self._gt_panels, h, w),
         )
         cv2.imwrite(
-            os.path.join(self.out_dir, f"val_batch{b}_pred.jpg"),
-            _mosaic(pred_panels, H, W),
+            os.path.join(self.out_dir, f"val_batch{f}_pred.jpg"),
+            _mosaic(self._pred_panels, h, w),
         )
         logging.info(
-            f"ValPredictionVisualizer: wrote val_batch{b}_labels/pred.jpg to {self.out_dir}"
+            f"ValPredictionVisualizer: wrote val_batch{f}_labels/pred.jpg "
+            f"({len(self._gt_panels)} images) to {self.out_dir}"
         )
+        self._file_idx += 1
+        self._gt_panels = []
+        self._pred_panels = []
 
     def synchronize_between_processes(self):
         pass  # 只在 rank 0 本地出图, 无需同步
 
     def compute_synced(self):
+        if is_main_process() and self._file_idx < self.max_files:
+            try:
+                self._flush()  # 验证收尾: 落盘不足 per_file 的零头
+            except Exception:
+                logging.exception("ValPredictionVisualizer: flush failed, skipping")
         return {}
 
     def compute(self):
         return {}
 
     def reset(self):
-        self._batch_idx = 0
+        self._reset_buffer()
