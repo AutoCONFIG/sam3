@@ -386,6 +386,10 @@ class Trainer:
             "steps": self.steps,
             "time_elapsed": self.time_elapsed_meter.val,
             "best_meter_values": self.best_meter_values,
+            "early_stop": {
+                "best": self._early_stop_best,
+                "bad_count": self._early_stop_bad_count,
+            },
         }
         if self.optim_conf.amp.enabled:
             checkpoint["scaler"] = self.scaler.state_dict()
@@ -478,6 +482,10 @@ class Trainer:
             self.scaler.load_state_dict(checkpoint["scaler"])
 
         self.best_meter_values = checkpoint.get("best_meter_values", {})
+        early_stop_state = checkpoint.get("early_stop")
+        if early_stop_state:
+            self._early_stop_best = early_stop_state.get("best")
+            self._early_stop_bad_count = early_stop_state.get("bad_count", 0)
 
         if "train_dataset" in checkpoint and self.train_dataset is not None:
             self.train_dataset.load_checkpoint_state(checkpoint["train_dataset"])
@@ -1244,6 +1252,7 @@ class Trainer:
         if improved:
             self._early_stop_best = value
             self._early_stop_bad_count = 0
+            self._save_best_checkpoint(metric, value)
         else:
             self._early_stop_bad_count += 1
         logging.info(
@@ -1251,6 +1260,24 @@ class Trainer:
             f"no-improve={self._early_stop_bad_count}/{patience}"
         )
         return self._early_stop_bad_count >= patience
+
+    def _save_best_checkpoint(self, metric: str, value: float):
+        """early_stop 指标刷新时, 把本 epoch 的 checkpoint.pt 复制为 checkpoint_best.pt。
+
+        仅 rank 0 经 _early_stop_decision 调用; val 在 train 存盘之后运行,
+        此刻 checkpoint.pt 内容即当前最优模型, 直接复制即可 (失败仅告警)。
+        """
+        src = os.path.join(self.checkpoint_conf.save_dir, "checkpoint.pt")
+        dst = os.path.join(self.checkpoint_conf.save_dir, "checkpoint_best.pt")
+        if not g_pathmgr.isfile(src):
+            return
+        try:
+            if g_pathmgr.exists(dst):
+                g_pathmgr.rm(dst)
+            g_pathmgr.copy(src, dst)
+            logging.info(f"best checkpoint updated ({metric}={value:.4f}): {dst}")
+        except Exception:
+            logging.exception("save best checkpoint failed, skipping")
 
     def _log_loss_detailed_and_return_core_loss(self, loss, loss_str, step):
         core_loss = loss.pop(CORE_LOSS_KEY)
