@@ -4,12 +4,17 @@
 
 """Dataset class for modulated detection"""
 
+import io
 import json
+import logging
+import mmap
 import os
 import random
 import sys
+import time
 import traceback
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
@@ -160,6 +165,7 @@ class CustomCocoDetectionAPI(VisionDataset):
         # pyrefly: ignore [bad-function-definition]
         limit_ids: int = None,
         limit_ratio: float = 1.0,
+        cache_images: Union[bool, str] = "none",
     ) -> None:
         super().__init__(root)
 
@@ -179,6 +185,21 @@ class CustomCocoDetectionAPI(VisionDataset):
         self.set_sharded_annotation_file(0)
         self.training = training
         self.blurring_masks_path = blurring_masks_path
+
+        # cache_images 三档 (兼容 bool: True→"ram", False→"none"):
+        #   "none": 不缓存, 每样本从磁盘读 (默认, 行为同上游)
+        #   "ram" : init 时把全部图片字节读进内存 (压缩格式不解码), 之后从 RAM 解码;
+        #           必须在 DataLoader fork worker 之前建好, worker 以 COW 共享
+        #   "disk": 把全部图片打包成注解旁的单个大文件 (顺序写, 只需构建一次),
+        #           之后 mmap 读; 多进程/多任务经 OS page cache 共享, 不占额外内存
+        self.cache_mode = self._normalize_cache_mode(cache_images)
+        self._image_cache: Optional[Dict[str, bytes]] = None
+        self._pack_index: Optional[Dict[str, Tuple[int, int]]] = None
+        self._pack_mmap = None
+        if self.cache_mode == "ram":
+            self._image_cache = self._build_image_cache()
+        elif self.cache_mode == "disk":
+            self._pack_index = self._load_or_build_image_pack()
 
     def _load_images(
         self, datapoint_id: int, img_ids_to_load: Optional[Set[int]] = None
@@ -219,13 +240,153 @@ class CustomCocoDetectionAPI(VisionDataset):
                         )
                     )
                 else:
-                    with g_pathmgr.open(path, "rb") as fopen:
-                        all_images.append((img_id, PILImage.open(fopen).convert("RGB")))
+                    cached = self._read_cached(current_meta["file_name"])
+                    if cached is not None:
+                        all_images.append(
+                            (
+                                img_id,
+                                PILImage.open(io.BytesIO(cached)).convert("RGB"),
+                            )
+                        )
+                    else:
+                        with g_pathmgr.open(path, "rb") as fopen:
+                            all_images.append(
+                                (img_id, PILImage.open(fopen).convert("RGB"))
+                            )
             except FileNotFoundError as e:
                 print(f"File not found: {path} from dataset: {self.annFile}")
                 raise e
 
         return all_images, all_img_metadata
+
+    @staticmethod
+    def _normalize_cache_mode(cache_images) -> str:
+        if isinstance(cache_images, str):
+            mode = cache_images.lower()
+            assert mode in ("none", "ram", "disk"), (
+                f"cache_images 只支持 none/ram/disk (得到 {cache_images})"
+            )
+            return mode
+        return "ram" if cache_images else "none"
+
+    def _cached_file_names(self) -> List[str]:
+        """self.ids 覆盖到的图片相对文件名 (已按 fix_fname 处理, 排序去重)。
+
+        缓存键用文件名而不是图片 id: COCO_FROM_JSON 返回的图片 id 恒为 0。
+        视频帧 (.mp4@frame) 不缓存, 仍走 decord 实时解码。
+        """
+        file_names = set()
+        for dp_id in self.ids.tolist():
+            for meta in self.coco.loadImagesFromDatapoint(dp_id):
+                fname = meta["file_name"]
+                if self.fix_fname:
+                    fname = fname.split("/")[-1]
+                if ".mp4" in fname:
+                    continue
+                file_names.add(fname)
+        return sorted(file_names)
+
+    def _read_file(self, fname: str) -> bytes:
+        with g_pathmgr.open(os.path.join(self.root, fname), "rb") as f:
+            return f.read()
+
+    def _read_cached(self, fname: str) -> Optional[bytes]:
+        if self._image_cache is not None:
+            return self._image_cache.get(fname)
+        if self._pack_index is not None and self._pack_mmap is not None:
+            span = self._pack_index.get(fname)
+            if span is not None:
+                return self._pack_mmap[span[0] : span[0] + span[1]]
+        return None
+
+    def _build_image_cache(self) -> Dict[str, bytes]:
+        """把 self.ids 覆盖到的所有图片文件读入内存 (保留压缩字节)。"""
+        file_names = self._cached_file_names()
+        t0 = time.time()
+        cache: Dict[str, bytes] = {}
+        # 多线程掩盖小文件 open/seek 开销; 读出来就是顺序字节流
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            for fname, buf in pool.map(lambda fn: (fn, self._read_file(fn)), file_names):
+                cache[fname] = buf
+        total_mb = sum(len(b) for b in cache.values()) / 1024 / 1024
+        logging.info(
+            f"[cache_images] {self.annFile}: cached {len(cache)} images "
+            f"({total_mb:.1f} MB compressed) in {time.time() - t0:.1f}s"
+        )
+        return cache
+
+    def _load_or_build_image_pack(self) -> Optional[Dict[str, Tuple[int, int]]]:
+        """加载 (必要时构建) 注解旁的图片打包文件, 返回 {文件名: (偏移, 长度)}。
+
+        打包文件: ``<annFile>.imgcache.bin`` (图片字节顺序拼接) +
+        ``<annFile>.imgcache.json`` (索引)。文件名集合或总字节数对不上即重建。
+        """
+        bin_path = self.annFile + ".imgcache.bin"
+        idx_path = self.annFile + ".imgcache.json"
+        file_names = self._cached_file_names()
+
+        index = None
+        try:
+            with open(idx_path, "r") as f:
+                pack_meta = json.load(f)
+            if sorted(pack_meta["files"].keys()) == file_names and os.path.getsize(
+                bin_path
+            ) == pack_meta["total_bytes"]:
+                index = {k: tuple(v) for k, v in pack_meta["files"].items()}
+                logging.info(
+                    f"[cache_images] reuse pack {bin_path} "
+                    f"({len(index)} images, {pack_meta['total_bytes'] / 1024 / 1024:.1f} MB)"
+                )
+        except (OSError, ValueError, KeyError):
+            index = None
+
+        if index is None:
+            index = self._build_image_pack(bin_path, idx_path, file_names)
+        if index is None:
+            return None
+
+        fd = os.open(bin_path, os.O_RDONLY)
+        self._pack_mmap = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+        os.close(fd)  # 映射已建立, fd 可关
+        return index
+
+    def _build_image_pack(
+        self, bin_path: str, idx_path: str, file_names: List[str]
+    ) -> Optional[Dict[str, Tuple[int, int]]]:
+        """多线程读小文件 + 顺序写单个大文件; tmp+rename 保证并发任务落盘的是完整文件。"""
+        t0 = time.time()
+        pid = os.getpid()
+        tmp_bin = f"{bin_path}.tmp{pid}"
+        tmp_idx = f"{idx_path}.tmp{pid}"
+        try:
+            offset = 0
+            index: Dict[str, Tuple[int, int]] = {}
+            with ThreadPoolExecutor(max_workers=16) as pool, open(tmp_bin, "wb") as out:
+                for fname, buf in pool.map(
+                    lambda fn: (fn, self._read_file(fn)), file_names
+                ):
+                    index[fname] = (offset, len(buf))
+                    out.write(buf)
+                    offset += len(buf)
+            with open(tmp_idx, "w") as f:
+                json.dump({"total_bytes": offset, "files": index}, f)
+            os.replace(tmp_bin, bin_path)
+            os.replace(tmp_idx, idx_path)
+        except OSError as e:
+            # 如数据集目录只读: 清理临时文件, 回退为不缓存
+            logging.warning(
+                f"[cache_images] 打包文件构建失败 ({e}), 回退为不缓存"
+            )
+            for p in (tmp_bin, tmp_idx):
+                if os.path.exists(p):
+                    os.remove(p)
+            return None
+        logging.info(
+            f"[cache_images] packed {len(index)} images "
+            f"({offset / 1024 / 1024:.1f} MB) -> {bin_path} "
+            f"in {time.time() - t0:.1f}s"
+        )
+        return index
 
     def set_curr_epoch(self, epoch: int):
         self.curr_epoch = epoch
@@ -467,6 +628,7 @@ class Sam3ImageDataset(CustomCocoDetectionAPI):
         # pyrefly: ignore [bad-function-definition]
         limit_ids: int = None,
         limit_ratio: float = 1.0,
+        cache_images: Union[bool, str] = "none",
     ):
         super(Sam3ImageDataset, self).__init__(
             img_folder,
@@ -481,6 +643,7 @@ class Sam3ImageDataset(CustomCocoDetectionAPI):
             coco_json_loader=coco_json_loader,
             limit_ids=limit_ids,
             limit_ratio=limit_ratio,
+            cache_images=cache_images,
         )
 
         self._transforms = transforms
