@@ -34,6 +34,10 @@ class Sam3VideoPredictor(Sam3BasePredictor):
         video_loader_type="cv2",
         apply_temporal_disambiguation: bool = True,
         compile: bool = False,
+        # 检测后处理阈值 (透传给 build_sam3_video_model):
+        score_threshold_detection: float = 0.5,
+        det_nms_thresh: float = 0.1,
+        new_det_thresh: float = 0.7,
     ):
         super().__init__()
         self.async_loading_frames = async_loading_frames
@@ -49,6 +53,9 @@ class Sam3VideoPredictor(Sam3BasePredictor):
                 strict_state_dict_loading=strict_state_dict_loading,
                 apply_temporal_disambiguation=apply_temporal_disambiguation,
                 compile=compile,
+                score_threshold_detection=score_threshold_detection,
+                det_nms_thresh=det_nms_thresh,
+                new_det_thresh=new_det_thresh,
             )
             .cuda()
             .eval()
