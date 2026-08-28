@@ -37,18 +37,25 @@ class Sam3MultiplexVideoPredictor(Sam3BasePredictor):
         default_output_prob_thresh=0.5,
         async_loading_frames=True,
         warm_up=False,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         super().__init__()
         self.model = model
         self.session_expiration_sec = session_expiration_sec
         self.default_output_prob_thresh = default_output_prob_thresh
         self.async_loading_frames = async_loading_frames
+        self.device = device
 
-        # turn on tfloat32 for Ampere GPUs
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        # use bfloat16 inference for Flash Attention kernel
-        self.bf16_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if torch.cuda.is_available():
+            # turn on tfloat32 for Ampere GPUs
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            # use bfloat16 inference for Flash Attention kernel
+            self.bf16_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        else:
+            # CPU: 无 Flash Attention, 不开 bf16 autocast (CPU bf16 对此模型无益且
+            # 部分 op 不支持)。用空 context manager 占位, 保持 shutdown 路径一致。
+            self.bf16_context = torch.autocast(device_type="cpu", enabled=False)
         self.bf16_context.__enter__()
 
         if warm_up:

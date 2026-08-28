@@ -167,8 +167,12 @@ class Sam3MultiplexTrackerPredictor(nn.Module):
         self.model = model
         self.per_obj_inference = per_obj_inference
         self.fill_hole_area = fill_hole_area
-        # use bfloat16 inference for Flash Attention kernel
-        self.bf16_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        # use bfloat16 inference for Flash Attention kernel (CUDA only);
+        # CPU 下无 Flash Attention, 用空 cpu autocast 占位保持上下文管理器写法
+        if torch.cuda.is_available():
+            self.bf16_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        else:
+            self.bf16_context = torch.autocast(device_type="cpu", enabled=False)
         self.bf16_context.__enter__()  # keep using for the entire model process
 
     def __getattr__(self, name):
@@ -2940,6 +2944,10 @@ class Sam3MultiplexPredictorWrapper(Sam3MultiplexTrackerPredictor):
         self.is_multiplex = is_multiplex
         self.is_multiplex_dynamic = is_multiplex_dynamic
 
-        # use bfloat16 inference for Flash Attention kernel
-        self.bf16_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        # use bfloat16 inference for Flash Attention kernel (CUDA only);
+        # CPU 下用空 cpu autocast 占位
+        if torch.cuda.is_available():
+            self.bf16_context = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        else:
+            self.bf16_context = torch.autocast(device_type="cpu", enabled=False)
         self.bf16_context.__enter__()

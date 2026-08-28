@@ -38,28 +38,31 @@ class Sam3VideoPredictor(Sam3BasePredictor):
         score_threshold_detection: float = 0.5,
         det_nms_thresh: float = 0.1,
         new_det_thresh: float = 0.7,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         super().__init__()
         self.async_loading_frames = async_loading_frames
         self.video_loader_type = video_loader_type
+        # 统一规范化 device: "cuda" → 首个可用 GPU; "cpu" → CPU。
+        # 无 CUDA 时自动落 CPU, 让 predict 链可在纯 CPU 环境跑通。
+        self.device = torch.device(
+            device if device != "cuda" or torch.cuda.is_available() else "cpu"
+        )
         from sam3.model_builder import build_sam3_video_model
 
-        self.model = (
-            build_sam3_video_model(
-                checkpoint_path=checkpoint_path,
-                bpe_path=bpe_path,
-                has_presence_token=has_presence_token,
-                geo_encoder_use_img_cross_attn=geo_encoder_use_img_cross_attn,
-                strict_state_dict_loading=strict_state_dict_loading,
-                apply_temporal_disambiguation=apply_temporal_disambiguation,
-                compile=compile,
-                score_threshold_detection=score_threshold_detection,
-                det_nms_thresh=det_nms_thresh,
-                new_det_thresh=new_det_thresh,
-            )
-            .cuda()
-            .eval()
-        )
+        self.model = build_sam3_video_model(
+            checkpoint_path=checkpoint_path,
+            bpe_path=bpe_path,
+            has_presence_token=has_presence_token,
+            geo_encoder_use_img_cross_attn=geo_encoder_use_img_cross_attn,
+            strict_state_dict_loading=strict_state_dict_loading,
+            apply_temporal_disambiguation=apply_temporal_disambiguation,
+            compile=compile,
+            score_threshold_detection=score_threshold_detection,
+            det_nms_thresh=det_nms_thresh,
+            new_det_thresh=new_det_thresh,
+            device=str(self.device),
+        ).to(device=self.device).eval()
 
     def remove_object(
         self,
@@ -86,22 +89,26 @@ class Sam3VideoPredictor(Sam3BasePredictor):
             nf = s["state"]["num_frames"]
             live_session_strs.append(f"'{sid}' ({nf} frames)")
         joined = ", ".join(live_session_strs)
-        mem_alloc = torch.cuda.memory_allocated() // 1024**2
-        mem_res = torch.cuda.memory_reserved() // 1024**2
-        max_alloc = torch.cuda.max_memory_allocated() // 1024**2
-        max_res = torch.cuda.max_memory_reserved() // 1024**2
-        return (
-            f"live sessions: [{joined}], GPU memory: "
-            f"{mem_alloc} MiB used and {mem_res} MiB reserved"
-            f" (max over time: {max_alloc} MiB used and {max_res} MiB reserved)"
-        )
+        if torch.cuda.is_available():
+            mem_alloc = torch.cuda.memory_allocated() // 1024**2
+            mem_res = torch.cuda.memory_reserved() // 1024**2
+            max_alloc = torch.cuda.max_memory_allocated() // 1024**2
+            max_res = torch.cuda.max_memory_reserved() // 1024**2
+            return (
+                f"live sessions: [{joined}], GPU memory: "
+                f"{mem_alloc} MiB used and {mem_res} MiB reserved"
+                f" (max over time: {max_alloc} MiB used and {max_res} MiB reserved)"
+            )
+        return f"live sessions: [{joined}] (CPU mode, no GPU memory stats)"
 
     def _get_torch_and_gpu_properties(self):
         """Get a string for PyTorch and GPU properties."""
-        return (
-            f"torch: {torch.__version__} with CUDA arch {torch.cuda.get_arch_list()}, "
-            f"GPU device: {torch.cuda.get_device_properties(torch.cuda.current_device())}"
-        )
+        if torch.cuda.is_available():
+            return (
+                f"torch: {torch.__version__} with CUDA arch {torch.cuda.get_arch_list()}, "
+                f"GPU device: {torch.cuda.get_device_properties(torch.cuda.current_device())}"
+            )
+        return f"torch: {torch.__version__} (CPU mode, no CUDA)"
 
     def shutdown(self):
         tracker = getattr(self.model, "tracker", None)
@@ -117,6 +124,22 @@ class Sam3VideoPredictor(Sam3BasePredictor):
 
 class Sam3VideoPredictorMultiGPU(Sam3VideoPredictor):
     def __init__(self, *model_args, gpus_to_use=None, **model_kwargs):
+        # ── CPU 退化: 无 CUDA 时跳过多卡分发/NCCL, 直接走单进程父类构造 ──
+        # Sam3VideoPredictorMultiGPU 的多卡架构 (spawn worker / NCCL process
+        # group / per-rank cuda device) 围绕 CUDA 设计, CPU 下 __init__ 即崩
+        # (current_device/set_device)。纯 CPU 推理时退化为单进程, 功能完整,
+        # 仅无多卡加速。device 参数透传给父类 Sam3VideoPredictor。
+        if not torch.cuda.is_available():
+            model_kwargs.setdefault("device", "cpu")
+            logger.info("CUDA unavailable: falling back to single-process CPU mode")
+            super().__init__(*model_args, **model_kwargs)
+            self.gpus_to_use = []
+            self.rank = 0
+            self.world_size = 1
+            self.rank_str = "rank=0 (CPU single-process)"
+            self.has_shutdown = False
+            return
+
         if gpus_to_use is None:
             # if not specified, use only the current GPU by default
             gpus_to_use = [torch.cuda.current_device()]

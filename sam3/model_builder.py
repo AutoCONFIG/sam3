@@ -1121,6 +1121,7 @@ def build_sam3_multiplex_video_predictor(
     score_threshold_detection: float = 0.4,
     det_nms_thresh: float = 0.1,
     new_det_thresh: float = 0.65,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ):
     """
     Build a fully-initialized Sam3MultiplexVideoPredictor.
@@ -1280,7 +1281,11 @@ def build_sam3_multiplex_video_predictor(
                 f"Unexpected keys ({len(unexpected_keys)}): {unexpected_keys[:10]}..."
             )
 
-    demo_model.cuda().eval()
+    # 按 device 放置模型 (原硬编码 .cuda(); 现支持 CPU 推理)
+    _target_device = torch.device(
+        device if device != "cuda" or torch.cuda.is_available() else "cpu"
+    )
+    demo_model.to(_target_device).eval()
 
     # Wrap in predictor
     predictor = Sam3MultiplexVideoPredictor(
@@ -1289,6 +1294,7 @@ def build_sam3_multiplex_video_predictor(
         default_output_prob_thresh=default_output_prob_thresh,
         async_loading_frames=async_loading_frames,
         warm_up=warm_up,
+        device=str(_target_device),
     )
     return predictor
 

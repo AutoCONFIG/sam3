@@ -210,7 +210,19 @@ class Sam3BasePredictor:
         valid_params = set(sig.parameters.keys())
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        # autocast 按 device 走: CPU 下无 Flash Attention, 不开 bf16
+        # (用空 cpu autocast 占位, 保持上下文管理器写法一致)。
+        _dev = getattr(self, "device", None)
+        _use_cuda = (
+            str(_dev) != "cpu"
+            and (_dev is None or "cuda" in str(_dev))
+            and torch.cuda.is_available()
+        )
+        with torch.autocast(
+            device_type="cuda" if _use_cuda else "cpu",
+            dtype=torch.bfloat16 if _use_cuda else None,
+            enabled=_use_cuda,
+        ):
             frame_idx, outputs = self.model.add_prompt(**filtered_kwargs)
         return {"frame_index": frame_idx, "outputs": outputs}
 
