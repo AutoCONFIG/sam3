@@ -165,7 +165,7 @@ class CustomCocoDetectionAPI(VisionDataset):
         # pyrefly: ignore [bad-function-definition]
         limit_ids: int = None,
         limit_ratio: float = 1.0,
-        cache_images: Union[bool, str] = "none",
+        cache_images: str = "none",
     ) -> None:
         super().__init__(root)
 
@@ -186,19 +186,16 @@ class CustomCocoDetectionAPI(VisionDataset):
         self.training = training
         self.blurring_masks_path = blurring_masks_path
 
-        # cache_images 三档 (兼容 bool: True→"ram", False→"none"):
+        # cache_images 两档:
         #   "none": 不缓存, 每样本从磁盘读 (默认, 行为同上游)
-        #   "ram" : init 时把全部图片字节读进内存 (压缩格式不解码), 之后从 RAM 解码;
-        #           必须在 DataLoader fork worker 之前建好, worker 以 COW 共享
         #   "disk": 把全部图片打包成注解旁的单个大文件 (顺序写, 只需构建一次),
-        #           之后 mmap 读; 多进程/多任务经 OS page cache 共享, 不占额外内存
+        #           之后 mmap 读; 跨进程/跨任务经 OS page cache 共享, 不占额外
+        #           常驻内存。mmap 懒建立 (对象不可 pickle, 不能随 spawn 传递)。
         self.cache_mode = self._normalize_cache_mode(cache_images)
-        self._image_cache: Optional[Dict[str, bytes]] = None
         self._pack_index: Optional[Dict[str, Tuple[int, int]]] = None
+        self._pack_bin_path: Optional[str] = None
         self._pack_mmap = None
-        if self.cache_mode == "ram":
-            self._image_cache = self._build_image_cache()
-        elif self.cache_mode == "disk":
+        if self.cache_mode == "disk":
             self._pack_index = self._load_or_build_image_pack()
 
     def _load_images(
@@ -261,13 +258,11 @@ class CustomCocoDetectionAPI(VisionDataset):
 
     @staticmethod
     def _normalize_cache_mode(cache_images) -> str:
-        if isinstance(cache_images, str):
-            mode = cache_images.lower()
-            assert mode in ("none", "ram", "disk"), (
-                f"cache_images 只支持 none/ram/disk (得到 {cache_images})"
-            )
-            return mode
-        return "ram" if cache_images else "none"
+        mode = str(cache_images).lower()
+        assert mode in ("none", "disk"), (
+            f"cache_images 只支持 none/disk (得到 {cache_images})"
+        )
+        return mode
 
     def _cached_file_names(self) -> List[str]:
         """self.ids 覆盖到的图片相对文件名 (已按 fix_fname 处理, 排序去重)。
@@ -291,35 +286,22 @@ class CustomCocoDetectionAPI(VisionDataset):
             return f.read()
 
     def _read_cached(self, fname: str) -> Optional[bytes]:
-        if self._image_cache is not None:
-            return self._image_cache.get(fname)
-        if self._pack_index is not None and self._pack_mmap is not None:
+        if self._pack_index is not None:
             span = self._pack_index.get(fname)
             if span is not None:
-                return self._pack_mmap[span[0] : span[0] + span[1]]
+                mm = self._get_pack_mmap()
+                if mm is not None:
+                    return mm[span[0] : span[0] + span[1]]
         return None
-
-    def _build_image_cache(self) -> Dict[str, bytes]:
-        """把 self.ids 覆盖到的所有图片文件读入内存 (保留压缩字节)。"""
-        file_names = self._cached_file_names()
-        t0 = time.time()
-        cache: Dict[str, bytes] = {}
-        # 多线程掩盖小文件 open/seek 开销; 读出来就是顺序字节流
-        with ThreadPoolExecutor(max_workers=16) as pool:
-            for fname, buf in pool.map(lambda fn: (fn, self._read_file(fn)), file_names):
-                cache[fname] = buf
-        total_mb = sum(len(b) for b in cache.values()) / 1024 / 1024
-        logging.info(
-            f"[cache_images] {self.annFile}: cached {len(cache)} images "
-            f"({total_mb:.1f} MB compressed) in {time.time() - t0:.1f}s"
-        )
-        return cache
 
     def _load_or_build_image_pack(self) -> Optional[Dict[str, Tuple[int, int]]]:
         """加载 (必要时构建) 注解旁的图片打包文件, 返回 {文件名: (偏移, 长度)}。
 
         打包文件: ``<annFile>.imgcache.bin`` (图片字节顺序拼接) +
         ``<annFile>.imgcache.json`` (索引)。文件名集合或总字节数对不上即重建。
+
+        只返回纯 dict 索引 (可 pickle, 能随 dataset 传给 spawn worker);
+        mmap 对象不可 pickle, 由 ``_get_pack_mmap`` 在各进程内懒建立。
         """
         bin_path = self.annFile + ".imgcache.bin"
         idx_path = self.annFile + ".imgcache.json"
@@ -345,10 +327,20 @@ class CustomCocoDetectionAPI(VisionDataset):
         if index is None:
             return None
 
-        fd = os.open(bin_path, os.O_RDONLY)
-        self._pack_mmap = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
-        os.close(fd)  # 映射已建立, fd 可关
+        self._pack_bin_path = bin_path
         return index
+
+    def _get_pack_mmap(self):
+        """懒建立 mmap (每进程一份; mmap 不占 RSS, 只是虚拟地址映射)。
+
+        mmap.mmap 不可 pickle, 不能存在 dataset 实例上随 spawn 传递, 故在每个
+        进程首次需要读 pack 时按需建立。
+        """
+        if self._pack_mmap is None and self._pack_bin_path is not None:
+            fd = os.open(self._pack_bin_path, os.O_RDONLY)
+            self._pack_mmap = mmap.mmap(fd, 0, access=mmap.ACCESS_READ)
+            os.close(fd)  # 映射已建立, fd 可关
+        return self._pack_mmap
 
     def _build_image_pack(
         self, bin_path: str, idx_path: str, file_names: List[str]
@@ -628,7 +620,7 @@ class Sam3ImageDataset(CustomCocoDetectionAPI):
         # pyrefly: ignore [bad-function-definition]
         limit_ids: int = None,
         limit_ratio: float = 1.0,
-        cache_images: Union[bool, str] = "none",
+        cache_images: str = "none",
     ):
         super(Sam3ImageDataset, self).__init__(
             img_folder,

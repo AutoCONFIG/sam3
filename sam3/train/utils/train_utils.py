@@ -72,7 +72,17 @@ def setup_distributed_backend(backend, timeout_mins):
     # of waiting
     os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
     logging.info(f"Setting up torch.distributed with a timeout of {timeout_mins} mins")
-    dist.init_process_group(backend=backend, timeout=timedelta(minutes=timeout_mins))
+    # device_id: 把 NCCL 通信绑定到本进程 GPU, 消除 barrier() 的
+    # "using the device under current context" 警告 (torch>=2.4)。
+    # 此函数在 trainer 的 torch.cuda.set_device 之前执行, 故直接读 LOCAL_RANK;
+    # gloo/CPU 后端或无 CUDA 时不传 (device_id 仅对 nccl 有意义)。
+    device_id = None
+    if backend == "nccl" and torch.cuda.is_available():
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        device_id = torch.device("cuda", local_rank)
+    dist.init_process_group(
+        backend=backend, timeout=timedelta(minutes=timeout_mins), device_id=device_id
+    )
     return dist.get_rank()
 
 
